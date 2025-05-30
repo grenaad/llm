@@ -6,7 +6,7 @@ services:
       WEBUI_SECRET_KEY: "Rhi5Rkju8EU5jvvy"
       ENABLE_RAG_WEB_SEARCH: True
       RAG_WEB_SEARCH_ENGINE: "searxng"
-      RAG_WEB_SEARCH_RESULT_COUNT: 3
+      RAG_WEB_SEARCH_RESULT_COUNT: 5
       RAG_WEB_SEARCH_CONCURRENT_REQUESTS: 10
       SEARXNG_QUERY_URL: "http://searxng:8080/search?q=<query>"
       WEBUI_AUTH: "false" # To disable login,
@@ -18,6 +18,9 @@ services:
     volumes:
       - open-webui:/app/backend/data
     restart: always
+    networks:
+      - llm_net
+
   searxng:
     container_name: searxng
     image: searxng/searxng:latest
@@ -28,8 +31,10 @@ services:
     env_file:
       - .env
     restart: unless-stopped
-    cap_drop:
-      - ALL
+    environment:
+      - SEARXNG_BASE_URL=https://${SEARXNG_HOSTNAME:-localhost}/
+    # cap_drop:
+    #   - ALL
     cap_add:
       - CHOWN
       - SETGID
@@ -40,6 +45,12 @@ services:
       options:
         max-size: "1m"
         max-file: "1"
+    networks:
+      - llm_net
 
 volumes:
   open-webui:
+
+networks:
+  llm_net:
+    driver: bridge
