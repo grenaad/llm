@@ -3,7 +3,7 @@
 
 IMAGE_NAME := parakeet-webui
 CONTAINER_NAME := parakeet-web
-PORT := 7860
+PORT := 7001
 
 .PHONY: build run start stop restart logs clean shell status gpu rebuild
 
@@ -20,7 +20,7 @@ run: build
 		-p $(PORT):7860 \
 		--shm-size=8GB \
 		--name $(CONTAINER_NAME) \
-		-v $(PWD):/app \
+		-v $(CURDIR):/app \
 		-v ~/.cache/huggingface:/root/.cache/huggingface \
 		$(IMAGE_NAME)
 	@echo "Container started. Model loading (~2 min)..."

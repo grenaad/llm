@@ -274,15 +274,14 @@ services:
     build:
       context: ../../backend
       dockerfile: Dockerfile.model_server
-    # GPU Support: Uncomment the following lines to enable GPU support
-    # Requires nvidia-container-toolkit to be installed on the host
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+    # GPU Support: Using GTX 1060 (device 1) for embeddings
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
+              capabilities: [gpu]
     command: >
       /bin/sh -c "if [ \"${DISABLE_MODEL_SERVER:-}\" = \"True\" ] || [ \"${DISABLE_MODEL_SERVER:-}\" = \"true\" ]; then
         echo 'Skipping service...';
@@ -321,15 +320,14 @@ services:
     build:
       context: ../../backend
       dockerfile: Dockerfile.model_server
-    # GPU Support: Uncomment the following lines to enable GPU support
-    # Requires nvidia-container-toolkit to be installed on the host
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+    # GPU Support: Using GTX 1060 (device 1) for embeddings
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
+              capabilities: [gpu]
     command: >
       /bin/sh -c "if [ \"${DISABLE_MODEL_SERVER:-}\" = \"True\" ] || [ \"${DISABLE_MODEL_SERVER:-}\" = \"true\" ]; then
         echo 'Skipping service...';
@@ -476,7 +474,7 @@ services:
       - NGINX_PROXY_READ_TIMEOUT=${NGINX_PROXY_READ_TIMEOUT:-300}
     ports:
       - "${HOST_PORT_80:-80}:80"
-      - "${HOST_PORT:-3000}:80" # allow for localhost:3000 usage, since that is the norm
+      - "${HOST_PORT:-7000}:80" # allow for localhost:7000 usage
     volumes:
       # Mount templates read-only; the startup command copies them into
       # the writable /etc/nginx/conf.d/ inside the container.  This avoids

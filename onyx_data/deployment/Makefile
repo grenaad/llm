@@ -12,12 +12,12 @@ COMPOSE := docker compose -f $(COMPOSE_FILE)
 # First time setup (pull images + create + start containers)
 run:
 	$(COMPOSE) up -d
-	@echo "Onyx started. Access UI at: http://localhost:3000"
+	@echo "Onyx started. Access UI at: http://localhost:7000"
 
 # Start existing containers
 start:
 	$(COMPOSE) start
-	@echo "Onyx started. Access UI at: http://localhost:3000"
+	@echo "Onyx started. Access UI at: http://localhost:7000"
 
 # Stop all containers
 stop:
