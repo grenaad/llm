@@ -1,0 +1,24 @@
+# GPU override for NVIDIA GPU systems
+# Usage: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+# Or use: make run-gpu
+
+services:
+  inference_model_server:
+    # GPU Support: Using GTX 1060 (device 1) for embeddings
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
+              capabilities: [gpu]
+
+  indexing_model_server:
+    # GPU Support: Using GTX 1060 (device 1) for embeddings
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
+              capabilities: [gpu]

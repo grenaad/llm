@@ -274,14 +274,7 @@ services:
     build:
       context: ../../backend
       dockerfile: Dockerfile.model_server
-    # GPU Support: Using GTX 1060 (device 1) for embeddings
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ['1']
-              capabilities: [gpu]
+    # GPU Support: Use docker-compose.gpu.yml override or `make run-gpu` for NVIDIA GPU
     command: >
       /bin/sh -c "if [ \"${DISABLE_MODEL_SERVER:-}\" = \"True\" ] || [ \"${DISABLE_MODEL_SERVER:-}\" = \"true\" ]; then
         echo 'Skipping service...';
@@ -320,14 +313,7 @@ services:
     build:
       context: ../../backend
       dockerfile: Dockerfile.model_server
-    # GPU Support: Using GTX 1060 (device 1) for embeddings
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ['1']
-              capabilities: [gpu]
+    # GPU Support: Use docker-compose.gpu.yml override or `make run-gpu` for NVIDIA GPU
     command: >
       /bin/sh -c "if [ \"${DISABLE_MODEL_SERVER:-}\" = \"True\" ] || [ \"${DISABLE_MODEL_SERVER:-}\" = \"true\" ]; then
         echo 'Skipping service...';

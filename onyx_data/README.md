@@ -45,3 +45,46 @@ downloaded during the initial setup. Feel free to edit the .env file to customiz
 located near the top of the file.
 
 IMAGE_TAG is the version of Onyx to run. It is recommended to leave it as latest to get all updates with each redeployment.
+
+## Makefile Commands
+
+The `deployment/` directory includes a Makefile for convenient management:
+
+| Command | Description |
+|---------|-------------|
+| `make run` | First time setup (pull + create + start) |
+| `make start` | Start existing containers |
+| `make stop` | Stop all containers |
+| `make restart` | Restart all containers |
+| `make status` | Show container status |
+| `make logs` | Tail logs for all services |
+| `make upgrade` | Stop, pull latest, and restart |
+| `make clean` | Stop and remove containers (keeps data) |
+| `make clean-all` | Stop and DELETE ALL DATA (destructive) |
+
+Run `make help` for the full list of available commands.
+
+## CPU vs GPU Mode
+
+By default, Onyx runs in **CPU mode**, which works on any machine including MacBooks.
+
+For systems with an **NVIDIA GPU**, use the GPU variants for faster embedding operations:
+
+| CPU (default) | GPU (NVIDIA) |
+|---------------|--------------|
+| `make run` | `make run-gpu` |
+| `make start` | `make start-gpu` |
+| `make restart` | `make restart-gpu` |
+| `make upgrade` | `make upgrade-gpu` |
+
+The GPU configuration is defined in `docker-compose.gpu.yml` and uses device ID `1` by default.
+
+## macOS Port Conflict
+
+On macOS, port 7000 is used by AirPlay Receiver. To avoid conflicts, set a different port in `.env`:
+
+```
+HOST_PORT=7002
+```
+
+Then access Onyx at `http://localhost:7002`
