@@ -1,10 +1,8 @@
 import asyncio
 import logging
-import os
 import sys
 import time
 import traceback
-from collections import deque
 from pathlib import Path
 from uuid import uuid4
 
@@ -36,6 +34,32 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+# --- Global transcription queue ---
+# All WebSocket connections share this queue so only one transcription
+# runs at a time on the GPU, regardless of how many browsers are connected.
+transcription_queue: asyncio.Queue = asyncio.Queue()
+
+
+async def global_transcription_worker():
+    """Process transcription jobs one at a time, globally.
+
+    Each job is a tuple of (ws, file_info, cancel_flag).
+    This ensures only one file is being transcribed on the GPU at any time,
+    even if multiple browsers are submitting files simultaneously.
+    """
+    while True:
+        ws, file_info, cancel_flag = await transcription_queue.get()
+        remaining = transcription_queue.qsize()
+        log.info("Transcription starting: %s (%d more in queue)",
+                 file_info["name"], remaining)
+        try:
+            await process_file(ws, file_info, cancel_flag)
+        except Exception:
+            pass  # process_file already handles errors internally
+        finally:
+            transcription_queue.task_done()
+
+
 # --- App setup ---
 app = FastAPI(title="Parakeet Transcription")
 
@@ -45,6 +69,7 @@ async def startup():
     import threading
     threading.Thread(target=load_model, daemon=True, name="model-loader").start()
     log.info("Server ready, model loading in background")
+    asyncio.create_task(global_transcription_worker())
 
 
 # --- API routes ---
@@ -102,29 +127,8 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     log.info("WebSocket connected")
 
-    # Per-connection state: transcription queue and cancellation flags
-    queue: deque[dict] = deque()
+    # Track cancel flags for this connection's files
     cancel_flags: dict[str, asyncio.Event] = {}
-    processing = False
-    processing_lock = asyncio.Lock()
-
-    async def process_queue():
-        """Process files in the queue one at a time."""
-        nonlocal processing
-        async with processing_lock:
-            if processing:
-                return
-            processing = True
-
-        try:
-            while queue:
-                file_info = queue.popleft()
-                remaining = len(queue)
-                log.info("Transcription starting: %s (%d more in queue)",
-                         file_info["name"], remaining)
-                await process_file(ws, file_info, cancel_flags)
-        finally:
-            processing = False
 
     try:
         while True:
@@ -132,18 +136,18 @@ async def websocket_endpoint(ws: WebSocket):
             msg_type = data.get("type")
 
             if msg_type == "transcribe":
-                # Add file to queue and start processing
                 file_info = {
                     "id": data["file_id"],
                     "name": data["file_name"],
                     "path": data["file_path"],
                 }
-                cancel_flags[file_info["id"]] = asyncio.Event()
-                queue.append(file_info)
-                log.info("Queued: %s (queue depth: %d)", file_info["name"], len(queue))
+                cancel_flag = asyncio.Event()
+                cancel_flags[file_info["id"]] = cancel_flag
 
-                # Kick off processing (no-op if already running)
-                asyncio.create_task(process_queue())
+                # Add to global queue -- the single worker processes sequentially
+                await transcription_queue.put((ws, file_info, cancel_flag))
+                log.info("Queued: %s (global queue depth: %d)",
+                         file_info["name"], transcription_queue.qsize())
 
             elif msg_type == "cancel":
                 file_id = data.get("file_id")
@@ -157,7 +161,11 @@ async def websocket_endpoint(ws: WebSocket):
                 log.info("Cancel all requested (%d files)", len(cancel_flags))
 
     except WebSocketDisconnect:
-        log.info("WebSocket disconnected")
+        log.info("WebSocket disconnected, cancelling %d pending files",
+                 len(cancel_flags))
+        # Cancel all pending jobs for this connection so the worker skips them
+        for flag in cancel_flags.values():
+            flag.set()
     except Exception as e:
         log.error("WebSocket error: %s", e)
         traceback.print_exc()
@@ -166,7 +174,7 @@ async def websocket_endpoint(ws: WebSocket):
 async def process_file(
     ws: WebSocket,
     file_info: dict,
-    cancel_flags: dict[str, asyncio.Event],
+    cancel_flag: asyncio.Event,
 ):
     """Transcribe a single file with chunk progress reporting."""
     file_id = file_info["id"]
@@ -175,13 +183,16 @@ async def process_file(
 
     try:
         # Check cancellation before starting
-        if file_id in cancel_flags and cancel_flags[file_id].is_set():
+        if cancel_flag.is_set():
             log.info("Skipped (cancelled): %s", file_name)
-            await ws.send_json({
-                "type": "cancelled",
-                "file_id": file_id,
-                "name": file_name,
-            })
+            try:
+                await ws.send_json({
+                    "type": "cancelled",
+                    "file_id": file_id,
+                    "name": file_name,
+                })
+            except Exception:
+                pass
             return
 
         # Send status: transcribing
@@ -209,8 +220,6 @@ async def process_file(
                 }),
                 loop,
             )
-            # Wait for the send to complete (with timeout) to ensure
-            # messages are delivered in order
             try:
                 future.result(timeout=5)
             except Exception as e:
@@ -224,7 +233,7 @@ async def process_file(
         elapsed = time.monotonic() - t0
 
         # Check cancellation after transcription
-        if file_id in cancel_flags and cancel_flags[file_id].is_set():
+        if cancel_flag.is_set():
             log.info("Cancelled after transcription: %s", file_name)
             await ws.send_json({
                 "type": "cancelled",
@@ -255,7 +264,6 @@ async def process_file(
             pass  # WebSocket may have closed
 
     finally:
-        cancel_flags.pop(file_id, None)
         # Clean up uploaded file after processing
         try:
             Path(file_path).unlink(missing_ok=True)

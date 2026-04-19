@@ -59,10 +59,10 @@ def load_model():
     """Load the Parakeet TDT-1.1B model. Called once at startup."""
     global _model
     device = get_device()
-    log.info("Loading Parakeet TDT-1.1B on %s", device.upper())
+    log.info("Loading Parakeet TDT-0.6B-v3 on %s", device.upper())
     t0 = time.monotonic()
 
-    model_name = "nvidia/parakeet-tdt-1.1b"
+    model_name = "nvidia/parakeet-tdt-0.6b-v3"
     _model = nemo_asr.models.ASRModel.from_pretrained(model_name=model_name)
 
     # 1080 Ti Optimization: Force Float32
