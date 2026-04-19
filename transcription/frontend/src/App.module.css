@@ -1,0 +1,450 @@
+/* ---- Layout ---- */
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.main {
+  max-width: 800px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 24px 20px 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* ---- Header ---- */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.headerLeft {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.headerRight {
+  display: flex;
+  align-items: center;
+}
+
+.statusBadge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.statusDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.statusOk {
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+}
+
+.statusError {
+  background: var(--error);
+  box-shadow: 0 0 6px var(--error);
+}
+
+.statusText {
+  white-space: nowrap;
+}
+
+/* ---- Drop Zone ---- */
+.dropZone {
+  border: 2px dashed var(--border-light);
+  border-radius: var(--radius-lg);
+  padding: 48px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: all var(--transition);
+  background: var(--bg-secondary);
+}
+
+.dropZone:hover {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.dropZoneActive {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  transform: scale(1.01);
+}
+
+.dropZoneDisabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.dropZoneContent {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.dropZoneIcon {
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.dropZoneText {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.dropZoneHint {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.dropZoneFormats {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+
+/* ---- File Section ---- */
+.fileSection {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.fileSectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sectionTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.fileSectionActions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ---- Upload Progress ---- */
+.uploadProgressBar {
+  height: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.uploadProgressFill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 100ms linear;
+}
+
+.uploadProgressText {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* ---- File List ---- */
+.fileList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.fileItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--bg-secondary);
+  transition: background var(--transition);
+}
+
+.fileItem:hover {
+  background: var(--bg-hover);
+}
+
+.fileItem + .fileItem {
+  border-top: 1px solid var(--border);
+}
+
+.fileInfo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+.fileName {
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fileSize {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.fileActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 12px;
+}
+
+.fileStatus {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.statusWaiting {
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+}
+
+.statusTranscribing {
+  color: var(--accent);
+  background: var(--accent-dim);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.statusDone {
+  color: var(--success);
+  background: var(--success-dim);
+}
+
+.statusErr {
+  color: var(--error);
+  background: var(--error-dim);
+}
+
+.statusCancelled {
+  color: var(--warning);
+  background: var(--warning-dim);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+/* ---- Buttons ---- */
+.btnCancel {
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: var(--radius);
+  background: var(--error-dim);
+  color: var(--error);
+  transition: all var(--transition);
+}
+
+.btnCancel:hover {
+  background: var(--error);
+  color: white;
+}
+
+.btnClear {
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: var(--radius);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  transition: all var(--transition);
+}
+
+.btnClear:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.btnCancelSmall,
+.btnRemove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  transition: all var(--transition);
+}
+
+.btnCancelSmall:hover {
+  background: var(--error-dim);
+  color: var(--error);
+}
+
+.btnRemove:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+/* ---- Results Section ---- */
+.resultsSection {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.resultsSectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.resultsActions {
+  display: flex;
+  gap: 6px;
+}
+
+.btnSecondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: var(--radius);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  transition: all var(--transition);
+}
+
+.btnSecondary:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--border-light);
+}
+
+.btnCopy {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  transition: all var(--transition);
+}
+
+.btnCopy:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+/* ---- Result Cards ---- */
+.resultsList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.resultCard {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.resultCardHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition);
+}
+
+.resultCardHeader:hover {
+  background: var(--bg-hover);
+}
+
+.resultCardTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.chevron {
+  transition: transform var(--transition);
+  color: var(--text-muted);
+}
+
+.chevronOpen {
+  transform: rotate(90deg);
+}
+
+.resultCardBody {
+  padding: 0 14px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.resultText {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text-primary);
+  padding-top: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

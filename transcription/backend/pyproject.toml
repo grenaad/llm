@@ -1,0 +1,17 @@
+[project]
+name = "parakeet-transcription"
+version = "1.0.0"
+requires-python = ">=3.10"
+dependencies = [
+    "torch==2.4.1",
+    "torchaudio==2.4.1",
+    "pyarrow<19.0.0",
+    "nemo_toolkit[asr]",
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "aiofiles",
+]
+
+[tool.uv]
+extra-index-url = ["https://download.pytorch.org/whl/cu124"]

@@ -12,7 +12,7 @@ PORT := 7001
 
 # Build the Docker image
 build:
-	docker build -t $(IMAGE_NAME) .
+	docker build --network=host -t $(IMAGE_NAME) .
 
 # Run a new container (first time setup)
 run: build
@@ -20,7 +20,6 @@ run: build
 		-p $(PORT):7860 \
 		--shm-size=8GB \
 		--name $(CONTAINER_NAME) \
-		-v $(CURDIR):/app \
 		-v ~/.cache/huggingface:/root/.cache/huggingface \
 		$(IMAGE_NAME)
 	@echo "Container started. Model loading (~2 min)..."
@@ -64,7 +63,7 @@ gpu:
 
 # Force rebuild without cache
 rebuild:
-	docker build --no-cache -t $(IMAGE_NAME) .
+	docker build --no-cache --network=host -t $(IMAGE_NAME) .
 
 # Help
 help:

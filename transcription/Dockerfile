@@ -1,11 +1,19 @@
+# Stage 1: Build SolidJS frontend with Bun
+FROM oven/bun:1 AS frontend-builder
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/bun.lock* ./
+RUN bun install
+COPY frontend/ .
+RUN bun run build
+
+# Stage 2: Python runtime with CUDA
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 WORKDIR /app
 
-# Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Python 3.10 and system dependencies required for audio processing
+# Install Python 3.10 and system dependencies for audio processing
 RUN apt-get update && apt-get install -y \
     python3.10 \
     python3-pip \
@@ -15,18 +23,19 @@ RUN apt-get update && apt-get install -y \
     sox \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip
-RUN pip3 install --no-cache-dir --upgrade pip
+# Install uv for fast dependency resolution
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Copy and install Python dependencies
-COPY requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
+# Copy and install Python dependencies with uv (pre-resolved lockfile)
+COPY backend/pyproject.toml backend/uv.lock ./
+RUN uv pip install --system --no-cache -r pyproject.toml
 
-# Copy application code
-COPY app.py .
+# Copy backend code
+COPY backend/ .
 
-# Expose Gradio default port
+# Copy built frontend from stage 1
+COPY --from=frontend-builder /app/frontend/dist ./static
+
 EXPOSE 7860
 
-# Run the application
-CMD ["python3", "app.py"]
+CMD ["python3", "main.py"]
