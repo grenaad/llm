@@ -13,12 +13,10 @@ export interface TranscriptionFile {
   path: string;
   size: number;
   status: FileStatus;
-  uploadProgress: number;
   text?: string;
   error?: string;
   progressSeconds?: number;
   totalSeconds?: number;
-  abortUpload?: () => void;
 }
 
 export interface UploadedFile {

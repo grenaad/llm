@@ -15,7 +15,7 @@ export interface UploadHandle {
 /**
  * Upload a single file as raw binary stream (no multipart overhead).
  * Sends the file body directly as application/octet-stream via POST.
- * Calls onProgress with (loaded, total) during upload.
+ * Calls onProgress with (loaded, total) during upload (throttled to max 10/sec).
  * Returns an UploadHandle with the promise and an abort function.
  */
 export function uploadFile(
@@ -25,9 +25,18 @@ export function uploadFile(
   const xhr = new XMLHttpRequest();
 
   const promise = new Promise<UploadedFile>((resolve, reject) => {
+    // Throttle progress updates to avoid excessive re-renders
+    let lastProgressTime = 0;
+    const PROGRESS_THROTTLE_MS = 100; // Max 10 updates per second
+
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) {
-        onProgress(e.loaded, e.total);
+        const now = Date.now();
+        // Always report 100% completion, throttle intermediate updates
+        if (e.loaded === e.total || now - lastProgressTime >= PROGRESS_THROTTLE_MS) {
+          lastProgressTime = now;
+          onProgress(e.loaded, e.total);
+        }
       }
     };
 

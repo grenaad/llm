@@ -5,16 +5,17 @@ import styles from "../App.module.css";
 
 interface FileListProps {
   files: TranscriptionFile[];
+  uploadProgress: Record<string, number>;
   onCancel: (fileId: string) => void;
   onCancelAll: () => void;
   onClear: () => void;
   onRemoveFile: (fileId: string) => void;
 }
 
-function statusLabel(file: TranscriptionFile): string {
+function statusLabel(file: TranscriptionFile, uploadProgress: Record<string, number>): string {
   switch (file.status) {
     case "uploading": {
-      const pct = Math.round(file.uploadProgress);
+      const pct = Math.round(uploadProgress[file.id] ?? 0);
       return `Uploading ${pct}%`;
     }
     case "uploaded":
@@ -97,7 +98,7 @@ export default function FileList(props: FileListProps) {
                   <span
                     class={`${styles.fileStatus} ${statusClass(file.status)}`}
                   >
-                    {statusLabel(file)}
+                    {statusLabel(file, props.uploadProgress)}
                   </span>
                   {/* Cancel button for uploading/waiting/transcribing - red X */}
                   <Show

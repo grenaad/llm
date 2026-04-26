@@ -7,9 +7,16 @@ import FileList from "./components/FileList";
 import Transcription from "./components/Transcription";
 import styles from "./App.module.css";
 
+// Store abort functions outside of reactive state
+// This avoids re-renders when storing/retrieving abort functions
+const abortFunctions = new Map<string, () => void>();
+
 export default function App() {
   const [files, setFiles] = createSignal<TranscriptionFile[]>([]);
   const [ws, setWs] = createSignal<WebSocket | null>(null);
+
+  // Separate signal for upload progress - updates frequently without causing row re-renders
+  const [uploadProgress, setUploadProgress] = createSignal<Record<string, number>>({});
 
   // Ensure we have a WebSocket connection, creating one if needed
   const ensureWs = (): WebSocket => {
@@ -26,8 +33,8 @@ export default function App() {
               prev.map((f) =>
                 f.id === msg.file_id
                   ? { ...f, status: msg.status as TranscriptionFile["status"] }
-                  : f,
-              ),
+                  : f
+              )
             );
             break;
 
@@ -35,9 +42,13 @@ export default function App() {
             setFiles((prev) =>
               prev.map((f) =>
                 f.id === msg.file_id
-                  ? { ...f, progressSeconds: msg.progress_seconds, totalSeconds: msg.total_seconds }
-                  : f,
-              ),
+                  ? {
+                      ...f,
+                      progressSeconds: msg.progress_seconds,
+                      totalSeconds: msg.total_seconds,
+                    }
+                  : f
+              )
             );
             break;
 
@@ -52,8 +63,8 @@ export default function App() {
                       progressSeconds: undefined,
                       totalSeconds: undefined,
                     }
-                  : f,
-              ),
+                  : f
+              )
             );
             break;
 
@@ -68,23 +79,23 @@ export default function App() {
                       progressSeconds: undefined,
                       totalSeconds: undefined,
                     }
-                  : f,
-              ),
+                  : f
+              )
             );
             break;
 
           case "cancelled":
             setFiles((prev) =>
               prev.map((f) =>
-                f.id === msg.file_id ? { ...f, status: "cancelled" } : f,
-              ),
+                f.id === msg.file_id ? { ...f, status: "cancelled" } : f
+              )
             );
             break;
         }
       },
       () => {
         setWs(null);
-      },
+      }
     );
 
     setWs(socket);
@@ -105,7 +116,7 @@ export default function App() {
           file_id: file.id,
           file_name: file.name,
           file_path: file.path,
-        }),
+        })
       );
     };
 
@@ -129,10 +140,18 @@ export default function App() {
       path: "",
       size: f.size,
       status: "uploading" as const,
-      uploadProgress: 0,
     }));
 
     setFiles((prev) => [...prev, ...placeholders]);
+
+    // Initialize progress for all placeholders
+    setUploadProgress((prev) => {
+      const updated = { ...prev };
+      for (const p of placeholders) {
+        updated[p.id] = 0;
+      }
+      return updated;
+    });
 
     // Upload sequentially, but don't wait for transcription.
     // Each upload completes -> sends transcribe request -> next upload starts.
@@ -151,22 +170,25 @@ export default function App() {
   const uploadSingleFile = async (file: File, placeholderId: string) => {
     const { promise, abort } = uploadFile(file, (loaded, total) => {
       const pct = (loaded / total) * 100;
-      setFiles((prev) =>
-        prev.map((f) =>
-          f.id === placeholderId ? { ...f, uploadProgress: pct } : f,
-        ),
-      );
+      // Update progress in separate signal - doesn't cause file row re-renders
+      setUploadProgress((prev) => ({ ...prev, [placeholderId]: pct }));
     });
 
-    // Store the abort function in file state
-    setFiles((prev) =>
-      prev.map((f) =>
-        f.id === placeholderId ? { ...f, abortUpload: abort } : f,
-      ),
-    );
+    // Store abort function outside of reactive state
+    abortFunctions.set(placeholderId, abort);
 
     try {
       const uploaded = await promise;
+
+      // Clean up abort function and progress
+      abortFunctions.delete(placeholderId);
+      setUploadProgress((prev) => {
+        const updated = { ...prev };
+        delete updated[placeholderId];
+        // Keep progress for the new ID
+        updated[uploaded.id] = 100;
+        return updated;
+      });
 
       // Replace placeholder with real file info
       const realFile: TranscriptionFile = {
@@ -175,25 +197,25 @@ export default function App() {
         path: uploaded.path,
         size: uploaded.size,
         status: "waiting",
-        uploadProgress: 100,
       };
 
       setFiles((prev) =>
-        prev.map((f) => (f.id === placeholderId ? realFile : f)),
+        prev.map((f) => (f.id === placeholderId ? realFile : f))
       );
 
       // Immediately request transcription
       requestTranscription(realFile);
     } catch (err) {
+      // Clean up abort function
+      abortFunctions.delete(placeholderId);
+
       const errorMessage = err instanceof Error ? err.message : String(err);
       // Don't show error for cancelled uploads
       if (errorMessage === "Upload cancelled") {
         setFiles((prev) =>
           prev.map((f) =>
-            f.id === placeholderId
-              ? { ...f, status: "cancelled" as const, abortUpload: undefined }
-              : f,
-          ),
+            f.id === placeholderId ? { ...f, status: "cancelled" as const } : f
+          )
         );
       } else {
         console.error(`Upload failed for ${file.name}:`, err);
@@ -204,21 +226,27 @@ export default function App() {
                   ...f,
                   status: "error" as const,
                   error: `Upload failed: ${errorMessage}`,
-                  uploadProgress: 0,
-                  abortUpload: undefined,
                 }
-              : f,
-          ),
+              : f
+          )
         );
       }
+
+      // Clean up progress
+      setUploadProgress((prev) => {
+        const updated = { ...prev };
+        delete updated[placeholderId];
+        return updated;
+      });
     }
   };
 
   const handleCancel = (fileId: string) => {
-    // Abort upload if in progress
-    const file = files().find((f) => f.id === fileId);
-    if (file?.abortUpload) {
-      file.abortUpload();
+    // Abort upload if in progress (stored outside reactive state)
+    const abortFn = abortFunctions.get(fileId);
+    if (abortFn) {
+      abortFn();
+      abortFunctions.delete(fileId);
     }
 
     // Cancel transcription via WebSocket
@@ -230,10 +258,9 @@ export default function App() {
 
   const handleCancelAll = () => {
     // Abort all uploads in progress
-    for (const file of files()) {
-      if (file.abortUpload) {
-        file.abortUpload();
-      }
+    for (const [id, abortFn] of abortFunctions) {
+      abortFn();
+      abortFunctions.delete(id);
     }
 
     // Cancel all transcriptions via WebSocket
@@ -245,19 +272,24 @@ export default function App() {
 
   const handleClear = () => {
     // Abort all uploads in progress before clearing
-    for (const file of files()) {
-      if (file.abortUpload) {
-        file.abortUpload();
-      }
+    for (const [id, abortFn] of abortFunctions) {
+      abortFn();
+      abortFunctions.delete(id);
     }
 
     ws()?.close();
     setWs(null);
     setFiles([]);
+    setUploadProgress({});
   };
 
   const handleRemoveFile = (fileId: string) => {
     setFiles((prev) => prev.filter((f) => f.id !== fileId));
+    setUploadProgress((prev) => {
+      const updated = { ...prev };
+      delete updated[fileId];
+      return updated;
+    });
   };
 
   onCleanup(() => {
@@ -268,12 +300,10 @@ export default function App() {
     <div class={styles.app}>
       <Header />
       <main class={styles.main}>
-        <FileUpload
-          onFilesSelected={handleFilesSelected}
-          disabled={false}
-        />
+        <FileUpload onFilesSelected={handleFilesSelected} disabled={false} />
         <FileList
           files={files()}
+          uploadProgress={uploadProgress()}
           onCancel={handleCancel}
           onCancelAll={handleCancelAll}
           onClear={handleClear}
