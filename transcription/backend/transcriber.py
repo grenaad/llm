@@ -21,6 +21,11 @@ VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".flv", ".w
 # Model configuration
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3")
 
+# Chunk config for very long files (avoids OOM when loading full audio into memory)
+# Whisper loads entire audio mel-spectrogram at once, so we split externally for huge files
+CHUNK_DURATION = 7200  # 2 hours per chunk
+CHUNK_OVERLAP = 2      # 2 second overlap to avoid cutting words at boundaries
+
 # Singleton model instance
 _model = None
 _device = None
@@ -121,6 +126,59 @@ def extract_audio_from_video(video_path: str) -> str:
     return temp_audio.name
 
 
+def split_audio_into_chunks(wav_path: str, duration: float) -> list[str]:
+    """Split a WAV file into chunks of CHUNK_DURATION seconds.
+
+    Returns list of paths to chunk files. Chunks have a small overlap
+    (CHUNK_OVERLAP seconds) so words at boundaries aren't lost.
+
+    This is needed because Whisper loads the entire audio mel-spectrogram
+    into memory at once, which causes OOM for very long files (8+ hours).
+    """
+    t0 = time.monotonic()
+    chunk_paths = []
+    start = 0.0
+    chunk_idx = 0
+
+    while start < duration:
+        chunk_file = tempfile.NamedTemporaryFile(
+            suffix=f"_chunk{chunk_idx:04d}.wav", delete=False
+        )
+        chunk_file.close()
+
+        # Each chunk is CHUNK_DURATION + CHUNK_OVERLAP seconds long,
+        # except the last one which goes to the end.
+        chunk_len = CHUNK_DURATION + CHUNK_OVERLAP
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", wav_path,
+            "-ss", str(start),
+            "-t", str(chunk_len),
+            "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+            chunk_file.name,
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            # Clean up all chunk files on error
+            for p in chunk_paths:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+            os.unlink(chunk_file.name)
+            raise RuntimeError(f"ffmpeg chunk split error: {result.stderr}")
+
+        chunk_paths.append(chunk_file.name)
+        start += CHUNK_DURATION
+        chunk_idx += 1
+
+    elapsed = time.monotonic() - t0
+    log.info("Split into %d chunks in %s", len(chunk_paths), _fmt_duration(elapsed))
+    return chunk_paths
+
+
 class ProgressCapture:
     """Captures Whisper's verbose output and extracts timestamps for progress reporting."""
 
@@ -210,8 +268,9 @@ def transcribe_file(
 ) -> str:
     """Transcribe a single audio/video file. Returns the transcription text.
 
-    Whisper handles long audio internally using a sliding 30-second window,
-    so no manual chunking is needed.
+    For files longer than CHUNK_DURATION, splits into chunks using ffmpeg
+    and transcribes each separately to avoid OOM (Whisper loads entire audio
+    mel-spectrogram into memory at once).
 
     Args:
         file_path: Path to the audio/video file.
@@ -230,6 +289,7 @@ def transcribe_file(
 
     ext = os.path.splitext(file_path)[1].lower()
     cleanup_audio = False
+    chunk_paths: list[str] = []
     t_total = time.monotonic()
 
     try:
@@ -245,15 +305,73 @@ def transcribe_file(
         duration = get_audio_duration(audio_path)
         log.info("Duration: %s", _fmt_duration(duration))
 
-        # Step 3: Transcribe (Whisper handles chunking internally)
-        _log_gpu_mem()
-        text = _transcribe_single(audio_path, duration, progress_callback)
+        # Step 3: Decide whether to chunk (for very long files)
+        if duration > CHUNK_DURATION + 30:
+            # Long file -> split into chunks to avoid OOM
+            total_chunks = int(duration // CHUNK_DURATION) + (
+                1 if duration % CHUNK_DURATION > 0 else 0
+            )
+            log.info("Long file, chunking into ~%d x %s segments",
+                     total_chunks, _fmt_duration(CHUNK_DURATION))
 
-        total_elapsed = time.monotonic() - t_total
-        log.info("Transcription complete: %s in %s (%d chars)",
-                 file_name, _fmt_duration(total_elapsed), len(text))
-        _log_gpu_mem()
-        return text
+            chunk_paths = split_audio_into_chunks(audio_path, duration)
+            total_chunks = len(chunk_paths)  # actual count after splitting
+
+            _log_gpu_mem()
+
+            texts = []
+            for i, chunk_path in enumerate(chunk_paths):
+                chunk_num = i + 1
+                chunk_offset = i * CHUNK_DURATION
+                chunk_duration = min(CHUNK_DURATION + CHUNK_OVERLAP, duration - chunk_offset)
+
+                # Create a wrapper callback that adds the chunk offset to progress
+                chunk_progress_callback = None
+                if progress_callback:
+                    def make_callback(offset: float, total: float):
+                        def callback(current_secs: float, _chunk_total: float):
+                            # Report cumulative progress: chunk offset + position within chunk
+                            progress_callback(offset + current_secs, total)
+                        return callback
+                    chunk_progress_callback = make_callback(chunk_offset, duration)
+
+                t_chunk = time.monotonic()
+                text = _transcribe_single(chunk_path, chunk_duration, chunk_progress_callback)
+                chunk_elapsed = time.monotonic() - t_chunk
+
+                texts.append(text)
+                log.info("Chunk %d/%d done in %s (%d chars)",
+                         chunk_num, total_chunks, _fmt_duration(chunk_elapsed), len(text))
+
+                # Clean up chunk immediately after transcription
+                try:
+                    os.unlink(chunk_path)
+                except OSError:
+                    pass
+
+            # Mark chunk_paths as cleaned so finally block doesn't double-delete
+            chunk_paths = []
+
+            # Report final progress
+            if progress_callback:
+                progress_callback(duration, duration)
+
+            total_elapsed = time.monotonic() - t_total
+            full_text = " ".join(texts)
+            log.info("Transcription complete: %s, %d chunks in %s, %d chars total",
+                     file_name, total_chunks, _fmt_duration(total_elapsed), len(full_text))
+            _log_gpu_mem()
+            return full_text
+        else:
+            # Short file -> transcribe directly
+            _log_gpu_mem()
+            text = _transcribe_single(audio_path, duration, progress_callback)
+
+            total_elapsed = time.monotonic() - t_total
+            log.info("Transcription complete: %s in %s (%d chars)",
+                     file_name, _fmt_duration(total_elapsed), len(text))
+            _log_gpu_mem()
+            return text
 
     except Exception:
         total_elapsed = time.monotonic() - t_total
@@ -267,6 +385,12 @@ def transcribe_file(
         if cleanup_audio:
             try:
                 os.unlink(audio_path)
+            except OSError:
+                pass
+        # Clean up any remaining chunk files (in case of error)
+        for p in chunk_paths:
+            try:
+                os.unlink(p)
             except OSError:
                 pass
 
