@@ -22,8 +22,9 @@ function statusLabel(file: TranscriptionFile): string {
     case "waiting":
       return "Waiting...";
     case "transcribing": {
-      if (file.chunk && file.totalChunks && file.totalChunks > 1) {
-        return `Transcribing ${file.chunk}/${file.totalChunks}`;
+      if (file.progressSeconds != null && file.totalSeconds) {
+        const pct = Math.round((file.progressSeconds / file.totalSeconds) * 100);
+        return `Transcribing ${pct}%`;
       }
       return "Transcribing...";
     }

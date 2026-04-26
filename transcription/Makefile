@@ -1,8 +1,8 @@
-# Parakeet ASR Transcription Service
+# Whisper ASR Transcription Service
 # Usage: make [target]
 
-IMAGE_NAME := parakeet-webui
-CONTAINER_NAME := parakeet-web
+IMAGE_NAME := whisper-webui
+CONTAINER_NAME := whisper-web
 PORT := 7001
 
 .PHONY: build run start stop restart logs clean shell status gpu rebuild
@@ -67,7 +67,7 @@ rebuild:
 
 # Help
 help:
-	@echo "Parakeet ASR Makefile"
+	@echo "Whisper ASR Makefile"
 	@echo ""
 	@echo "Usage: make [target]"
 	@echo ""

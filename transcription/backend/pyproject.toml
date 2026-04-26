@@ -1,12 +1,11 @@
 [project]
-name = "parakeet-transcription"
+name = "whisper-transcription"
 version = "1.0.0"
 requires-python = ">=3.10"
 dependencies = [
     "torch==2.4.1",
     "torchaudio==2.4.1",
-    "pyarrow<19.0.0",
-    "nemo_toolkit[asr]",
+    "openai-whisper",
     "fastapi",
     "uvicorn[standard]",
     "python-multipart",

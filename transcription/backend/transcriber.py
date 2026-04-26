@@ -1,7 +1,9 @@
 import json
 import logging
 import os
+import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -9,16 +11,15 @@ import traceback
 from typing import Callable, Optional
 
 import torch
-import nemo.collections.asr as nemo_asr
+import whisper
 
-log = logging.getLogger("parakeet")
+log = logging.getLogger("whisper")
 
 # Video extensions that need audio extraction
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".flv", ".wmv"}
 
-# Chunk config
-CHUNK_DURATION = 300  # 5 minutes in seconds
-CHUNK_OVERLAP = 2  # 2 second overlap to avoid cutting words
+# Model configuration
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3")
 
 # Singleton model instance
 _model = None
@@ -56,19 +57,17 @@ def get_device() -> str:
 
 
 def load_model():
-    """Load the Parakeet TDT-1.1B model. Called once at startup."""
+    """Load the Whisper model. Called once at startup."""
     global _model
     device = get_device()
-    log.info("Loading Parakeet TDT-0.6B-v3 on %s", device.upper())
+    log.info("Loading Whisper %s on %s", WHISPER_MODEL, device.upper())
     t0 = time.monotonic()
 
-    model_name = "nvidia/parakeet-tdt-0.6b-v3"
-    _model = nemo_asr.models.ASRModel.from_pretrained(model_name=model_name)
+    _model = whisper.load_model(WHISPER_MODEL, device=device)
 
     # 1080 Ti Optimization: Force Float32
     # Older GTX cards can sometimes get 'NaN' errors with half-precision (FP16)
-    _model = _model.to(device).float()
-    _model.eval()
+    _model = _model.float()
 
     elapsed = time.monotonic() - t0
     log.info("Model loaded in %s", _fmt_duration(elapsed))
@@ -117,65 +116,75 @@ def extract_audio_from_video(video_path: str) -> str:
     return temp_audio.name
 
 
-def split_audio_into_chunks(wav_path: str, duration: float) -> list[str]:
-    """Split a WAV file into chunks of CHUNK_DURATION seconds.
+class ProgressCapture:
+    """Captures Whisper's verbose output and extracts timestamps for progress reporting."""
 
-    Returns list of paths to chunk files. Chunks have a small overlap
-    (CHUNK_OVERLAP seconds) so words at boundaries aren't lost.
+    # Pattern: [00:05.120 --> 00:08.440] or [1:23:45.120 --> 1:23:48.440]
+    TIMESTAMP_PATTERN = re.compile(
+        r'\[(\d+):(\d+)\.(\d+)\s*-->\s*(\d+):(\d+)\.(\d+)\]'
+    )
+
+    def __init__(
+        self,
+        duration: float,
+        callback: Optional[Callable[[float, float], None]],
+    ):
+        self.duration = duration
+        self.callback = callback
+        self.original_stdout = None
+
+    def write(self, text: str):
+        # Always write to original stdout
+        if self.original_stdout:
+            self.original_stdout.write(text)
+
+        # Parse timestamp from lines like: [00:05.120 --> 00:08.440] text
+        if self.callback and self.duration > 0:
+            match = self.TIMESTAMP_PATTERN.search(text)
+            if match:
+                # Extract end timestamp (groups 4,5,6 are end time: MM:SS.mmm)
+                minutes = int(match.group(4))
+                seconds = int(match.group(5))
+                millis = int(match.group(6))
+                current_seconds = minutes * 60 + seconds + millis / 1000
+                self.callback(current_seconds, self.duration)
+
+    def flush(self):
+        if self.original_stdout:
+            self.original_stdout.flush()
+
+    def __enter__(self):
+        self.original_stdout = sys.stdout
+        sys.stdout = self
+        return self
+
+    def __exit__(self, *args):
+        sys.stdout = self.original_stdout
+
+
+def _transcribe_single(
+    audio_path: str,
+    duration: float = 0,
+    progress_callback: Optional[Callable[[float, float], None]] = None,
+) -> str:
+    """Transcribe audio file, reporting progress via callback.
+
+    Args:
+        audio_path: Path to the audio file.
+        duration: Total duration in seconds (for progress calculation).
+        progress_callback: Called with (current_seconds, total_seconds) as
+            segments are transcribed.
     """
-    t0 = time.monotonic()
-    chunk_paths = []
-    start = 0.0
-    chunk_idx = 0
-
-    while start < duration:
-        chunk_file = tempfile.NamedTemporaryFile(
-            suffix=f"_chunk{chunk_idx:04d}.wav", delete=False
-        )
-        chunk_file.close()
-
-        # Each chunk is CHUNK_DURATION + CHUNK_OVERLAP seconds long,
-        # except the last one which goes to the end.
-        chunk_len = CHUNK_DURATION + CHUNK_OVERLAP
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", wav_path,
-            "-ss", str(start),
-            "-t", str(chunk_len),
-            "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
-            chunk_file.name,
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            # Clean up all chunk files on error
-            for p in chunk_paths:
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
-            os.unlink(chunk_file.name)
-            raise RuntimeError(f"ffmpeg chunk split error: {result.stderr}")
-
-        chunk_paths.append(chunk_file.name)
-        start += CHUNK_DURATION
-        chunk_idx += 1
-
-    elapsed = time.monotonic() - t0
-    log.info("Split into %d chunks in %s", len(chunk_paths), _fmt_duration(elapsed))
-    return chunk_paths
-
-
-def _transcribe_single(audio_path: str) -> str:
-    """Transcribe a single audio file (must fit in GPU memory)."""
     with torch.no_grad():
-        transcriptions = _model.transcribe([audio_path])
+        with ProgressCapture(duration, progress_callback):
+            result = _model.transcribe(
+                audio_path,
+                language="en",  # Set to None for auto-detection if multilingual needed
+                fp16=False,  # Use FP32 for 1080 Ti compatibility
+                verbose=True,  # Enable segment output for progress parsing
+            )
 
-    result = transcriptions[0]
-    if hasattr(result, "text"):
-        return result.text
-    return str(result)
+    return result["text"].strip()
 
 
 def _log_gpu_mem():
@@ -186,8 +195,8 @@ def _log_gpu_mem():
         log.info("GPU memory: %.1f GB allocated, %.1f GB reserved", alloc, reserved)
 
 
-# Type for progress callback: (chunk_number, total_chunks) -> None
-ProgressCallback = Callable[[int, int], None]
+# Type for progress callback: (current_seconds, total_seconds) -> None
+ProgressCallback = Callable[[float, float], None]
 
 
 def transcribe_file(
@@ -196,13 +205,13 @@ def transcribe_file(
 ) -> str:
     """Transcribe a single audio/video file. Returns the transcription text.
 
-    For files longer than CHUNK_DURATION, splits into chunks and transcribes
-    each one separately to avoid GPU OOM on the GTX 1080 Ti.
+    Whisper handles long audio internally using a sliding 30-second window,
+    so no manual chunking is needed.
 
     Args:
         file_path: Path to the audio/video file.
-        progress_callback: Called with (current_chunk, total_chunks) after
-            each chunk is transcribed. Optional.
+        progress_callback: Called with (current_seconds, total_seconds) as
+            segments are transcribed. Optional.
     """
     if not _model_ready.is_set():
         log.info("Model still loading, waiting...")
@@ -216,7 +225,6 @@ def transcribe_file(
 
     ext = os.path.splitext(file_path)[1].lower()
     cleanup_audio = False
-    chunk_paths: list[str] = []
     t_total = time.monotonic()
 
     try:
@@ -228,67 +236,19 @@ def transcribe_file(
         else:
             audio_path = file_path
 
-        # Step 2: Check duration
+        # Step 2: Get duration for progress calculation
         duration = get_audio_duration(audio_path)
         log.info("Duration: %s", _fmt_duration(duration))
 
-        # Step 3: Decide whether to chunk
-        if duration > CHUNK_DURATION + 30:
-            # Long file -> split into chunks
-            total_chunks = int(duration // CHUNK_DURATION) + (
-                1 if duration % CHUNK_DURATION > 0 else 0
-            )
-            log.info("Long file, chunking into ~%d x %ds segments", total_chunks, CHUNK_DURATION)
+        # Step 3: Transcribe (Whisper handles chunking internally)
+        _log_gpu_mem()
+        text = _transcribe_single(audio_path, duration, progress_callback)
 
-            chunk_paths = split_audio_into_chunks(audio_path, duration)
-            total_chunks = len(chunk_paths)  # actual count after splitting
-
-            _log_gpu_mem()
-
-            texts = []
-            for i, chunk_path in enumerate(chunk_paths):
-                chunk_num = i + 1
-
-                if progress_callback:
-                    progress_callback(chunk_num, total_chunks)
-
-                t_chunk = time.monotonic()
-                text = _transcribe_single(chunk_path)
-                chunk_elapsed = time.monotonic() - t_chunk
-
-                texts.append(text)
-                log.info("Chunk %d/%d done in %s (%d chars)",
-                         chunk_num, total_chunks, _fmt_duration(chunk_elapsed), len(text))
-
-                # Clean up chunk immediately after transcription
-                try:
-                    os.unlink(chunk_path)
-                except OSError:
-                    pass
-
-            # Mark chunk_paths as cleaned so finally block doesn't double-delete
-            chunk_paths = []
-
-            total_elapsed = time.monotonic() - t_total
-            full_text = " ".join(texts)
-            log.info("Transcription complete: %s, %d chunks in %s, %d chars total",
-                     file_name, total_chunks, _fmt_duration(total_elapsed), len(full_text))
-            _log_gpu_mem()
-            return full_text
-        else:
-            # Short file -> transcribe directly
-            if progress_callback:
-                progress_callback(1, 1)
-
-            _log_gpu_mem()
-            t_chunk = time.monotonic()
-            text = _transcribe_single(audio_path)
-            chunk_elapsed = time.monotonic() - t_chunk
-
-            total_elapsed = time.monotonic() - t_total
-            log.info("Transcription complete: %s in %s (%d chars)",
-                     file_name, _fmt_duration(total_elapsed), len(text))
-            return text
+        total_elapsed = time.monotonic() - t_total
+        log.info("Transcription complete: %s in %s (%d chars)",
+                 file_name, _fmt_duration(total_elapsed), len(text))
+        _log_gpu_mem()
+        return text
 
     except Exception:
         total_elapsed = time.monotonic() - t_total
@@ -304,17 +264,15 @@ def transcribe_file(
                 os.unlink(audio_path)
             except OSError:
                 pass
-        # Clean up any remaining chunk files (in case of error)
-        for p in chunk_paths:
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
 
 
 def get_gpu_info() -> dict:
     """Return GPU information for the status endpoint."""
-    info = {"device": get_device(), "model_loaded": _model_ready.is_set()}
+    info = {
+        "device": get_device(),
+        "model_loaded": _model_ready.is_set(),
+        "model_name": f"whisper-{WHISPER_MODEL}",
+    }
     try:
         if torch.cuda.is_available():
             info["gpu_name"] = torch.cuda.get_device_name(0)

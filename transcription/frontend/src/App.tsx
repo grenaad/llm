@@ -35,7 +35,7 @@ export default function App() {
             setFiles((prev) =>
               prev.map((f) =>
                 f.id === msg.file_id
-                  ? { ...f, chunk: msg.chunk, totalChunks: msg.total_chunks }
+                  ? { ...f, progressSeconds: msg.progress_seconds, totalSeconds: msg.total_seconds }
                   : f,
               ),
             );
@@ -49,8 +49,8 @@ export default function App() {
                       ...f,
                       status: "done",
                       text: msg.text,
-                      chunk: undefined,
-                      totalChunks: undefined,
+                      progressSeconds: undefined,
+                      totalSeconds: undefined,
                     }
                   : f,
               ),
@@ -65,8 +65,8 @@ export default function App() {
                       ...f,
                       status: "error",
                       error: msg.error,
-                      chunk: undefined,
-                      totalChunks: undefined,
+                      progressSeconds: undefined,
+                      totalSeconds: undefined,
                     }
                   : f,
               ),

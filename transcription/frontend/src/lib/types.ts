@@ -16,8 +16,8 @@ export interface TranscriptionFile {
   uploadProgress: number;
   text?: string;
   error?: string;
-  chunk?: number;
-  totalChunks?: number;
+  progressSeconds?: number;
+  totalSeconds?: number;
 }
 
 export interface UploadedFile {
@@ -34,8 +34,8 @@ export interface WsMessage {
   status?: string;
   text?: string;
   error?: string;
-  chunk?: number;
-  total_chunks?: number;
+  progress_seconds?: number;
+  total_seconds?: number;
 }
 
 export interface GpuInfo {

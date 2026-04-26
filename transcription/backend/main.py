@@ -23,13 +23,12 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 # Quiet down noisy libraries
-logging.getLogger("nemo_logger").setLevel(logging.WARNING)
 logging.getLogger("matplotlib").setLevel(logging.WARNING)
 
-log = logging.getLogger("parakeet")
+log = logging.getLogger("whisper")
 
 # --- Configuration ---
-UPLOAD_DIR = Path("/tmp/parakeet_uploads")
+UPLOAD_DIR = Path("/tmp/whisper_uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -61,7 +60,7 @@ async def global_transcription_worker():
 
 
 # --- App setup ---
-app = FastAPI(title="Parakeet Transcription")
+app = FastAPI(title="Whisper Transcription")
 
 
 @app.on_event("startup")
@@ -203,20 +202,20 @@ async def process_file(
             "status": "transcribing",
         })
 
-        # Create a progress callback that sends chunk updates over WebSocket.
+        # Create a progress callback that sends progress updates over WebSocket.
         # Since transcribe_file runs in a thread pool, we need to use
         # run_coroutine_threadsafe to send messages from the thread.
         loop = asyncio.get_event_loop()
 
-        def progress_callback(chunk: int, total_chunks: int):
-            """Called from the transcription thread for each chunk."""
+        def progress_callback(current_seconds: float, total_seconds: float):
+            """Called from the transcription thread as segments complete."""
             future = asyncio.run_coroutine_threadsafe(
                 ws.send_json({
                     "type": "file_progress",
                     "file_id": file_id,
                     "name": file_name,
-                    "chunk": chunk,
-                    "total_chunks": total_chunks,
+                    "progress_seconds": current_seconds,
+                    "total_seconds": total_seconds,
                 }),
                 loop,
             )
