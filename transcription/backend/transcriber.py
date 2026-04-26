@@ -182,9 +182,10 @@ def split_audio_into_chunks(wav_path: str, duration: float) -> list[str]:
 class ProgressCapture:
     """Captures Whisper's verbose output and extracts timestamps for progress reporting."""
 
-    # Pattern: [00:05.120 --> 00:08.440] or [1:23:45.120 --> 1:23:48.440]
+    # Pattern matches both MM:SS.mmm and HH:MM:SS.mmm formats
+    # Examples: [00:15.320 --> 00:18.440] or [1:23:45.120 --> 1:23:48.440]
     TIMESTAMP_PATTERN = re.compile(
-        r'\[(\d+):(\d+)\.(\d+)\s*-->\s*(\d+):(\d+)\.(\d+)\]'
+        r'\[(?:(\d+):)?(\d+):(\d+)\.(\d+)\s*-->\s*(?:(\d+):)?(\d+):(\d+)\.(\d+)\]'
     )
 
     def __init__(
@@ -200,16 +201,20 @@ class ProgressCapture:
         # Always write to original stdout
         if self.original_stdout:
             self.original_stdout.write(text)
+            self.original_stdout.flush()  # Ensure output appears in docker logs
 
-        # Parse timestamp from lines like: [00:05.120 --> 00:08.440] text
+        # Parse timestamp from lines like: [00:05.120 --> 00:08.440] or [1:23:45.120 --> ...]
         if self.callback and self.duration > 0:
             match = self.TIMESTAMP_PATTERN.search(text)
             if match:
-                # Extract end timestamp (groups 4,5,6 are end time: MM:SS.mmm)
-                minutes = int(match.group(4))
-                seconds = int(match.group(5))
-                millis = int(match.group(6))
-                current_seconds = minutes * 60 + seconds + millis / 1000
+                # Extract end timestamp - handle both MM:SS.mmm and HH:MM:SS.mmm
+                # Groups: 1=start_hours?, 2=start_mins, 3=start_secs, 4=start_ms
+                #         5=end_hours?, 6=end_mins, 7=end_secs, 8=end_ms
+                end_hours = int(match.group(5)) if match.group(5) else 0
+                end_minutes = int(match.group(6))
+                end_seconds = int(match.group(7))
+                end_millis = int(match.group(8))
+                current_seconds = end_hours * 3600 + end_minutes * 60 + end_seconds + end_millis / 1000
                 self.callback(current_seconds, self.duration)
 
     def flush(self):
