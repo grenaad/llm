@@ -30,7 +30,7 @@ export default function Header() {
   return (
     <header class={styles.header}>
       <div class={styles.headerLeft}>
-        <h1 class={styles.title}>Parakeet Transcription</h1>
+        <h1 class={styles.title}>Whisper Transcription</h1>
         <span class={styles.subtitle}>Local speech-to-text</span>
       </div>
       <div class={styles.headerRight}>
