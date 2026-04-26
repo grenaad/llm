@@ -1,4 +1,5 @@
 import { createSignal, onCleanup } from "solid-js";
+import { FileStatus, isTerminalStatus } from "./lib/types";
 import type { TranscriptionFile, WsMessage } from "./lib/types";
 import { uploadFile, createWebSocket } from "./lib/api";
 import Header from "./components/Header";
@@ -58,7 +59,7 @@ export default function App() {
                 f.id === msg.file_id
                   ? {
                       ...f,
-                      status: "done",
+                      status: FileStatus.Done,
                       text: msg.text,
                       progressSeconds: undefined,
                       totalSeconds: undefined,
@@ -74,7 +75,7 @@ export default function App() {
                 f.id === msg.file_id
                   ? {
                       ...f,
-                      status: "error",
+                      status: FileStatus.Error,
                       error: msg.error,
                       progressSeconds: undefined,
                       totalSeconds: undefined,
@@ -87,7 +88,7 @@ export default function App() {
           case "cancelled":
             setFiles((prev) =>
               prev.map((f) =>
-                f.id === msg.file_id ? { ...f, status: "cancelled" } : f
+                f.id === msg.file_id ? { ...f, status: FileStatus.Cancelled } : f
               )
             );
             break;
@@ -139,7 +140,7 @@ export default function App() {
       name: f.name,
       path: "",
       size: f.size,
-      status: "uploading" as const,
+      status: FileStatus.Uploading,
     }));
 
     setFiles((prev) => [...prev, ...placeholders]);
@@ -196,7 +197,7 @@ export default function App() {
         name: uploaded.name,
         path: uploaded.path,
         size: uploaded.size,
-        status: "waiting",
+        status: FileStatus.Waiting,
       };
 
       setFiles((prev) =>
@@ -214,7 +215,7 @@ export default function App() {
       if (errorMessage === "Upload cancelled") {
         setFiles((prev) =>
           prev.map((f) =>
-            f.id === placeholderId ? { ...f, status: "cancelled" as const } : f
+            f.id === placeholderId ? { ...f, status: FileStatus.Cancelled } : f
           )
         );
       } else {
@@ -224,7 +225,7 @@ export default function App() {
             f.id === placeholderId
               ? {
                   ...f,
-                  status: "error" as const,
+                  status: FileStatus.Error,
                   error: `Upload failed: ${errorMessage}`,
                 }
               : f
@@ -271,16 +272,21 @@ export default function App() {
   };
 
   const handleClear = () => {
-    // Abort all uploads in progress before clearing
-    for (const [id, abortFn] of abortFunctions) {
-      abortFn();
-      abortFunctions.delete(id);
-    }
+    // Remove only finished items (done, cancelled, error)
+    const removedIds = new Set(
+      files()
+        .filter((f) => isTerminalStatus(f.status))
+        .map((f) => f.id)
+    );
 
-    ws()?.close();
-    setWs(null);
-    setFiles([]);
-    setUploadProgress({});
+    setFiles((prev) => prev.filter((f) => !removedIds.has(f.id)));
+    setUploadProgress((prev) => {
+      const updated = { ...prev };
+      for (const id of removedIds) {
+        delete updated[id];
+      }
+      return updated;
+    });
   };
 
   const handleRemoveFile = (fileId: string) => {

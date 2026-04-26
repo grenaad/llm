@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 
-from transcriber import load_model, transcribe_file, get_gpu_info, _fmt_size, _fmt_duration
+from transcriber import load_model, transcribe_file, get_gpu_info, is_model_ready, _fmt_size, _fmt_duration
 
 # --- Logging setup ---
 logging.basicConfig(
@@ -193,6 +193,30 @@ async def process_file(
             except Exception:
                 pass
             return
+
+        # Check if model is still loading
+        if not is_model_ready():
+            log.info("Waiting for model: %s", file_name)
+            await ws.send_json({
+                "type": "file_status",
+                "file_id": file_id,
+                "name": file_name,
+                "status": "loading_model",
+            })
+
+            # Wait for model in async-friendly way (allows cancellation)
+            while not is_model_ready():
+                if cancel_flag.is_set():
+                    log.info("Cancelled while waiting for model: %s", file_name)
+                    await ws.send_json({
+                        "type": "cancelled",
+                        "file_id": file_id,
+                        "name": file_name,
+                    })
+                    return
+                await asyncio.sleep(0.5)  # Check every 500ms
+
+            log.info("Model ready, starting: %s", file_name)
 
         # Send status: transcribing
         await ws.send_json({

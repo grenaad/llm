@@ -1,4 +1,5 @@
 import { For, Show, createSignal } from "solid-js";
+import { FileStatus } from "../lib/types";
 import type { TranscriptionFile } from "../lib/types";
 import styles from "../App.module.css";
 
@@ -7,7 +8,7 @@ interface TranscriptionProps {
 }
 
 export default function Transcription(props: TranscriptionProps) {
-  const completedFiles = () => props.files.filter((f) => f.status === "done" && f.text);
+  const completedFiles = () => props.files.filter((f) => f.status === FileStatus.Done && f.text);
   const hasResults = () => completedFiles().length > 0;
 
   const allPlainText = () =>

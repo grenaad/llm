@@ -1,4 +1,5 @@
 import { For, Show } from "solid-js";
+import { FileStatus, isTerminalStatus } from "../lib/types";
 import type { TranscriptionFile } from "../lib/types";
 import { formatFileSize } from "../lib/api";
 import styles from "../App.module.css";
@@ -14,43 +15,47 @@ interface FileListProps {
 
 function statusLabel(file: TranscriptionFile, uploadProgress: Record<string, number>): string {
   switch (file.status) {
-    case "uploading": {
+    case FileStatus.Uploading: {
       const pct = Math.round(uploadProgress[file.id] ?? 0);
       return `Uploading ${pct}%`;
     }
-    case "uploaded":
+    case FileStatus.Uploaded:
       return "Uploaded";
-    case "waiting":
+    case FileStatus.Waiting:
       return "Waiting...";
-    case "transcribing": {
+    case FileStatus.LoadingModel:
+      return "Loading Model...";
+    case FileStatus.Transcribing: {
       if (file.progressSeconds != null && file.totalSeconds) {
         const pct = Math.round((file.progressSeconds / file.totalSeconds) * 100);
         return `Transcribing ${pct}%`;
       }
       return "Transcribing...";
     }
-    case "done":
+    case FileStatus.Done:
       return "Done";
-    case "error":
+    case FileStatus.Error:
       return "Error";
-    case "cancelled":
+    case FileStatus.Cancelled:
       return "Cancelled";
     default:
       return file.status;
   }
 }
 
-function statusClass(status: string): string {
+function statusClass(status: FileStatus): string {
   switch (status) {
-    case "uploading":
+    case FileStatus.Uploading:
       return styles.statusTranscribing;
-    case "transcribing":
+    case FileStatus.LoadingModel:
       return styles.statusTranscribing;
-    case "done":
+    case FileStatus.Transcribing:
+      return styles.statusTranscribing;
+    case FileStatus.Done:
       return styles.statusDone;
-    case "error":
+    case FileStatus.Error:
       return styles.statusErr;
-    case "cancelled":
+    case FileStatus.Cancelled:
       return styles.statusCancelled;
     default:
       return styles.statusWaiting;
@@ -62,9 +67,10 @@ export default function FileList(props: FileListProps) {
   const isProcessing = () =>
     props.files.some(
       (f) =>
-        f.status === "transcribing" ||
-        f.status === "waiting" ||
-        f.status === "uploading",
+        f.status === FileStatus.Transcribing ||
+        f.status === FileStatus.Waiting ||
+        f.status === FileStatus.Uploading ||
+        f.status === FileStatus.LoadingModel,
     );
 
   return (
@@ -100,13 +106,9 @@ export default function FileList(props: FileListProps) {
                   >
                     {statusLabel(file, props.uploadProgress)}
                   </span>
-                  {/* Cancel button for uploading/waiting/transcribing - red X */}
+                  {/* Cancel button for uploading/waiting/loading_model/transcribing - red X */}
                   <Show
-                    when={
-                      file.status === "uploading" ||
-                      file.status === "waiting" ||
-                      file.status === "transcribing"
-                    }
+                    when={!isTerminalStatus(file.status)}
                   >
                     <button
                       class={styles.btnCancelSmall}
@@ -128,11 +130,7 @@ export default function FileList(props: FileListProps) {
                   </Show>
                   {/* Remove button for done/error/cancelled - trash icon */}
                   <Show
-                    when={
-                      file.status === "done" ||
-                      file.status === "error" ||
-                      file.status === "cancelled"
-                    }
+                    when={isTerminalStatus(file.status)}
                   >
                     <button
                       class={styles.btnRemove}

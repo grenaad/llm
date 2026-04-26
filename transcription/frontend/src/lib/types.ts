@@ -1,11 +1,23 @@
-export type FileStatus =
-  | "uploading"
-  | "uploaded"
-  | "waiting"
-  | "transcribing"
-  | "done"
-  | "error"
-  | "cancelled";
+export enum FileStatus {
+  Uploading = "uploading",
+  Uploaded = "uploaded",
+  Waiting = "waiting",
+  LoadingModel = "loading_model",
+  Transcribing = "transcribing",
+  Done = "done",
+  Error = "error",
+  Cancelled = "cancelled",
+}
+
+export const TERMINAL_STATUSES: readonly FileStatus[] = [
+  FileStatus.Done,
+  FileStatus.Error,
+  FileStatus.Cancelled,
+];
+
+export function isTerminalStatus(status: FileStatus): boolean {
+  return TERMINAL_STATUSES.includes(status);
+}
 
 export interface TranscriptionFile {
   id: string;

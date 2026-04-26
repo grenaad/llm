@@ -56,6 +56,11 @@ def get_device() -> str:
     return _device
 
 
+def is_model_ready() -> bool:
+    """Check if the model has finished loading."""
+    return _model_ready.is_set()
+
+
 def load_model():
     """Load the Whisper model. Called once at startup."""
     global _model
