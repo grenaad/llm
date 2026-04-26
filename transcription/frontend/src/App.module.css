@@ -312,7 +312,23 @@
   color: var(--text-primary);
 }
 
-.btnCancelSmall,
+.btnCancelSmall {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  background: var(--error-dim);
+  color: var(--error);
+  transition: all var(--transition);
+}
+
+.btnCancelSmall:hover {
+  background: var(--error);
+  color: white;
+}
+
 .btnRemove {
   display: flex;
   align-items: center;
@@ -323,11 +339,6 @@
   background: transparent;
   color: var(--text-muted);
   transition: all var(--transition);
-}
-
-.btnCancelSmall:hover {
-  background: var(--error-dim);
-  color: var(--error);
 }
 
 .btnRemove:hover {

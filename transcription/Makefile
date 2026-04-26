@@ -21,6 +21,7 @@ run: build
 		--shm-size=8GB \
 		--name $(CONTAINER_NAME) \
 		-v ~/.cache/huggingface:/root/.cache/huggingface \
+		-v ~/.cache/whisper:/root/.cache/whisper \
 		$(IMAGE_NAME)
 	@echo "Container started. Model loading (~2 min)..."
 	@echo "Access UI at: http://localhost:$(PORT)"

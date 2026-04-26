@@ -7,18 +7,24 @@ export async function fetchStatus(): Promise<GpuInfo> {
   return res.json();
 }
 
+export interface UploadHandle {
+  promise: Promise<UploadedFile>;
+  abort: () => void;
+}
+
 /**
  * Upload a single file as raw binary stream (no multipart overhead).
- * Sends the file body directly as application/octet-stream via PUT.
+ * Sends the file body directly as application/octet-stream via POST.
  * Calls onProgress with (loaded, total) during upload.
+ * Returns an UploadHandle with the promise and an abort function.
  */
 export function uploadFile(
   file: File,
   onProgress: (loaded: number, total: number) => void,
-): Promise<UploadedFile> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
+): UploadHandle {
+  const xhr = new XMLHttpRequest();
 
+  const promise = new Promise<UploadedFile>((resolve, reject) => {
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) {
         onProgress(e.loaded, e.total);
@@ -34,11 +40,17 @@ export function uploadFile(
     };
 
     xhr.onerror = () => reject(new Error("Upload failed: network error"));
+    xhr.onabort = () => reject(new Error("Upload cancelled"));
 
     const encodedName = encodeURIComponent(file.name);
     xhr.open("POST", `${API_BASE}/api/upload/${encodedName}`);
     xhr.send(file);
   });
+
+  return {
+    promise,
+    abort: () => xhr.abort(),
+  };
 }
 
 export function createWebSocket(

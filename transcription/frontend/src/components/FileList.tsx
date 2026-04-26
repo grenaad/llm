@@ -99,10 +99,12 @@ export default function FileList(props: FileListProps) {
                   >
                     {statusLabel(file)}
                   </span>
+                  {/* Cancel button for uploading/waiting/transcribing - red X */}
                   <Show
                     when={
-                      file.status === "transcribing" ||
-                      file.status === "waiting"
+                      file.status === "uploading" ||
+                      file.status === "waiting" ||
+                      file.status === "transcribing"
                     }
                   >
                     <button
@@ -123,6 +125,7 @@ export default function FileList(props: FileListProps) {
                       </svg>
                     </button>
                   </Show>
+                  {/* Remove button for done/error/cancelled - trash icon */}
                   <Show
                     when={
                       file.status === "done" ||
@@ -143,8 +146,9 @@ export default function FileList(props: FileListProps) {
                         stroke="currentColor"
                         stroke-width="2"
                       >
-                        <line x1="18" y1="6" x2="6" y2="18" />
-                        <line x1="6" y1="6" x2="18" y2="18" />
+                        <path d="M3 6h18" />
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                        <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
                       </svg>
                     </button>
                   </Show>

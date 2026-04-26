@@ -18,6 +18,7 @@ export interface TranscriptionFile {
   error?: string;
   progressSeconds?: number;
   totalSeconds?: number;
+  abortUpload?: () => void;
 }
 
 export interface UploadedFile {

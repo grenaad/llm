@@ -149,15 +149,24 @@ export default function App() {
    * Upload a single file and immediately request transcription when done.
    */
   const uploadSingleFile = async (file: File, placeholderId: string) => {
+    const { promise, abort } = uploadFile(file, (loaded, total) => {
+      const pct = (loaded / total) * 100;
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === placeholderId ? { ...f, uploadProgress: pct } : f,
+        ),
+      );
+    });
+
+    // Store the abort function in file state
+    setFiles((prev) =>
+      prev.map((f) =>
+        f.id === placeholderId ? { ...f, abortUpload: abort } : f,
+      ),
+    );
+
     try {
-      const uploaded = await uploadFile(file, (loaded, total) => {
-        const pct = (loaded / total) * 100;
-        setFiles((prev) =>
-          prev.map((f) =>
-            f.id === placeholderId ? { ...f, uploadProgress: pct } : f,
-          ),
-        );
-      });
+      const uploaded = await promise;
 
       // Replace placeholder with real file info
       const realFile: TranscriptionFile = {
@@ -176,23 +185,43 @@ export default function App() {
       // Immediately request transcription
       requestTranscription(realFile);
     } catch (err) {
-      console.error(`Upload failed for ${file.name}:`, err);
-      setFiles((prev) =>
-        prev.map((f) =>
-          f.id === placeholderId
-            ? {
-                ...f,
-                status: "error" as const,
-                error: `Upload failed: ${err}`,
-                uploadProgress: 0,
-              }
-            : f,
-        ),
-      );
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      // Don't show error for cancelled uploads
+      if (errorMessage === "Upload cancelled") {
+        setFiles((prev) =>
+          prev.map((f) =>
+            f.id === placeholderId
+              ? { ...f, status: "cancelled" as const, abortUpload: undefined }
+              : f,
+          ),
+        );
+      } else {
+        console.error(`Upload failed for ${file.name}:`, err);
+        setFiles((prev) =>
+          prev.map((f) =>
+            f.id === placeholderId
+              ? {
+                  ...f,
+                  status: "error" as const,
+                  error: `Upload failed: ${errorMessage}`,
+                  uploadProgress: 0,
+                  abortUpload: undefined,
+                }
+              : f,
+          ),
+        );
+      }
     }
   };
 
   const handleCancel = (fileId: string) => {
+    // Abort upload if in progress
+    const file = files().find((f) => f.id === fileId);
+    if (file?.abortUpload) {
+      file.abortUpload();
+    }
+
+    // Cancel transcription via WebSocket
     const socket = ws();
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: "cancel", file_id: fileId }));
@@ -200,6 +229,14 @@ export default function App() {
   };
 
   const handleCancelAll = () => {
+    // Abort all uploads in progress
+    for (const file of files()) {
+      if (file.abortUpload) {
+        file.abortUpload();
+      }
+    }
+
+    // Cancel all transcriptions via WebSocket
     const socket = ws();
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: "cancel_all" }));
@@ -207,6 +244,13 @@ export default function App() {
   };
 
   const handleClear = () => {
+    // Abort all uploads in progress before clearing
+    for (const file of files()) {
+      if (file.abortUpload) {
+        file.abortUpload();
+      }
+    }
+
     ws()?.close();
     setWs(null);
     setFiles([]);
