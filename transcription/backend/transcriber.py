@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -10,8 +9,7 @@ import time
 import traceback
 from typing import Callable, Optional
 
-import torch
-import whisper
+from faster_whisper import WhisperModel, BatchedInferencePipeline
 
 log = logging.getLogger("whisper")
 
@@ -20,14 +18,12 @@ VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".flv", ".w
 
 # Model configuration
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3")
-
-# Chunk config for very long files (avoids OOM when loading full audio into memory)
-# Whisper loads entire audio mel-spectrogram at once, so we split externally for huge files
-CHUNK_DURATION = 7200  # 2 hours per chunk
-CHUNK_OVERLAP = 2      # 2 second overlap to avoid cutting words at boundaries
+COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "float16")
+BATCH_SIZE = int(os.environ.get("WHISPER_BATCH_SIZE", "8"))
 
 # Singleton model instance
 _model = None
+_batched_model = None
 _device = None
 _model_ready = threading.Event()
 
@@ -57,7 +53,12 @@ def _fmt_duration(seconds: float) -> str:
 def get_device() -> str:
     global _device
     if _device is None:
-        _device = "cuda" if torch.cuda.is_available() else "cpu"
+        try:
+            import torch
+            _device = "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            # faster-whisper uses ctranslate2 which has its own CUDA detection
+            _device = "cuda"
     return _device
 
 
@@ -67,17 +68,21 @@ def is_model_ready() -> bool:
 
 
 def load_model():
-    """Load the Whisper model. Called once at startup."""
-    global _model
+    """Load the Whisper model using faster-whisper. Called once at startup."""
+    global _model, _batched_model
     device = get_device()
-    log.info("Loading Whisper %s on %s", WHISPER_MODEL, device.upper())
+    log.info("Loading faster-whisper %s on %s (compute_type=%s, batch_size=%d)",
+             WHISPER_MODEL, device.upper(), COMPUTE_TYPE, BATCH_SIZE)
     t0 = time.monotonic()
 
-    _model = whisper.load_model(WHISPER_MODEL, device=device)
+    _model = WhisperModel(
+        WHISPER_MODEL,
+        device=device,
+        compute_type=COMPUTE_TYPE,
+    )
 
-    # 1080 Ti Optimization: Force Float32
-    # Older GTX cards can sometimes get 'NaN' errors with half-precision (FP16)
-    _model = _model.float()
+    # Create batched inference pipeline for faster transcription
+    _batched_model = BatchedInferencePipeline(model=_model)
 
     elapsed = time.monotonic() - t0
     log.info("Model loaded in %s", _fmt_duration(elapsed))
@@ -126,141 +131,16 @@ def extract_audio_from_video(video_path: str) -> str:
     return temp_audio.name
 
 
-def split_audio_into_chunks(wav_path: str, duration: float) -> list[str]:
-    """Split a WAV file into chunks of CHUNK_DURATION seconds.
-
-    Returns list of paths to chunk files. Chunks have a small overlap
-    (CHUNK_OVERLAP seconds) so words at boundaries aren't lost.
-
-    This is needed because Whisper loads the entire audio mel-spectrogram
-    into memory at once, which causes OOM for very long files (8+ hours).
-    """
-    t0 = time.monotonic()
-    chunk_paths = []
-    start = 0.0
-    chunk_idx = 0
-
-    while start < duration:
-        chunk_file = tempfile.NamedTemporaryFile(
-            suffix=f"_chunk{chunk_idx:04d}.wav", delete=False
-        )
-        chunk_file.close()
-
-        # Each chunk is CHUNK_DURATION + CHUNK_OVERLAP seconds long,
-        # except the last one which goes to the end.
-        chunk_len = CHUNK_DURATION + CHUNK_OVERLAP
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", wav_path,
-            "-ss", str(start),
-            "-t", str(chunk_len),
-            "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
-            chunk_file.name,
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            # Clean up all chunk files on error
-            for p in chunk_paths:
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
-            os.unlink(chunk_file.name)
-            raise RuntimeError(f"ffmpeg chunk split error: {result.stderr}")
-
-        chunk_paths.append(chunk_file.name)
-        start += CHUNK_DURATION
-        chunk_idx += 1
-
-    elapsed = time.monotonic() - t0
-    log.info("Split into %d chunks in %s", len(chunk_paths), _fmt_duration(elapsed))
-    return chunk_paths
-
-
-class ProgressCapture:
-    """Captures Whisper's verbose output and extracts timestamps for progress reporting."""
-
-    # Pattern matches both MM:SS.mmm and HH:MM:SS.mmm formats
-    # Examples: [00:15.320 --> 00:18.440] or [1:23:45.120 --> 1:23:48.440]
-    TIMESTAMP_PATTERN = re.compile(
-        r'\[(?:(\d+):)?(\d+):(\d+)\.(\d+)\s*-->\s*(?:(\d+):)?(\d+):(\d+)\.(\d+)\]'
-    )
-
-    def __init__(
-        self,
-        duration: float,
-        callback: Optional[Callable[[float, float], None]],
-    ):
-        self.duration = duration
-        self.callback = callback
-        self.original_stdout = None
-
-    def write(self, text: str):
-        # Always write to original stdout
-        if self.original_stdout:
-            self.original_stdout.write(text)
-            self.original_stdout.flush()  # Ensure output appears in docker logs
-
-        # Parse timestamp from lines like: [00:05.120 --> 00:08.440] or [1:23:45.120 --> ...]
-        if self.callback and self.duration > 0:
-            match = self.TIMESTAMP_PATTERN.search(text)
-            if match:
-                # Extract end timestamp - handle both MM:SS.mmm and HH:MM:SS.mmm
-                # Groups: 1=start_hours?, 2=start_mins, 3=start_secs, 4=start_ms
-                #         5=end_hours?, 6=end_mins, 7=end_secs, 8=end_ms
-                end_hours = int(match.group(5)) if match.group(5) else 0
-                end_minutes = int(match.group(6))
-                end_seconds = int(match.group(7))
-                end_millis = int(match.group(8))
-                current_seconds = end_hours * 3600 + end_minutes * 60 + end_seconds + end_millis / 1000
-                self.callback(current_seconds, self.duration)
-
-    def flush(self):
-        if self.original_stdout:
-            self.original_stdout.flush()
-
-    def __enter__(self):
-        self.original_stdout = sys.stdout
-        sys.stdout = self
-        return self
-
-    def __exit__(self, *args):
-        sys.stdout = self.original_stdout
-
-
-def _transcribe_single(
-    audio_path: str,
-    duration: float = 0,
-    progress_callback: Optional[Callable[[float, float], None]] = None,
-) -> str:
-    """Transcribe audio file, reporting progress via callback.
-
-    Args:
-        audio_path: Path to the audio file.
-        duration: Total duration in seconds (for progress calculation).
-        progress_callback: Called with (current_seconds, total_seconds) as
-            segments are transcribed.
-    """
-    with torch.no_grad():
-        with ProgressCapture(duration, progress_callback):
-            result = _model.transcribe(
-                audio_path,
-                language="en",  # Set to None for auto-detection if multilingual needed
-                fp16=False,  # Use FP32 for 1080 Ti compatibility
-                verbose=True,  # Enable segment output for progress parsing
-            )
-
-    return result["text"].strip()
-
-
 def _log_gpu_mem():
     """Log current GPU memory usage (one line)."""
-    if torch.cuda.is_available():
-        alloc = torch.cuda.memory_allocated(0) / (1024 ** 3)
-        reserved = torch.cuda.memory_reserved(0) / (1024 ** 3)
-        log.info("GPU memory: %.1f GB allocated, %.1f GB reserved", alloc, reserved)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            alloc = torch.cuda.memory_allocated(0) / (1024 ** 3)
+            reserved = torch.cuda.memory_reserved(0) / (1024 ** 3)
+            log.info("GPU memory: %.1f GB allocated, %.1f GB reserved", alloc, reserved)
+    except ImportError:
+        pass
 
 
 # Type for progress callback: (current_seconds, total_seconds) -> None
@@ -271,11 +151,7 @@ def transcribe_file(
     file_path: str,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> str:
-    """Transcribe a single audio/video file. Returns the transcription text.
-
-    For files longer than CHUNK_DURATION, splits into chunks using ffmpeg
-    and transcribes each separately to avoid OOM (Whisper loads entire audio
-    mel-spectrogram into memory at once).
+    """Transcribe a single audio/video file using faster-whisper with batched inference.
 
     Args:
         file_path: Path to the audio/video file.
@@ -294,7 +170,6 @@ def transcribe_file(
 
     ext = os.path.splitext(file_path)[1].lower()
     cleanup_audio = False
-    chunk_paths: list[str] = []
     t_total = time.monotonic()
 
     try:
@@ -310,73 +185,57 @@ def transcribe_file(
         duration = get_audio_duration(audio_path)
         log.info("Duration: %s", _fmt_duration(duration))
 
-        # Step 3: Decide whether to chunk (for very long files)
-        if duration > CHUNK_DURATION + 30:
-            # Long file -> split into chunks to avoid OOM
-            total_chunks = int(duration // CHUNK_DURATION) + (
-                1 if duration % CHUNK_DURATION > 0 else 0
-            )
-            log.info("Long file, chunking into ~%d x %s segments",
-                     total_chunks, _fmt_duration(CHUNK_DURATION))
+        _log_gpu_mem()
 
-            chunk_paths = split_audio_into_chunks(audio_path, duration)
-            total_chunks = len(chunk_paths)  # actual count after splitting
+        # Step 3: Transcribe using batched inference pipeline
+        # faster-whisper handles chunking internally - no need for manual splitting
+        log.info("Transcribing with batched inference (batch_size=%d)...", BATCH_SIZE)
 
-            _log_gpu_mem()
+        segments, info = _batched_model.transcribe(
+            audio_path,
+            language="en",
+            batch_size=BATCH_SIZE,
+            beam_size=5,
+            vad_filter=True,  # Skip silence for speed
+            vad_parameters=dict(min_silence_duration_ms=1000),
+        )
 
-            texts = []
-            for i, chunk_path in enumerate(chunk_paths):
-                chunk_num = i + 1
-                chunk_offset = i * CHUNK_DURATION
-                chunk_duration = min(CHUNK_DURATION + CHUNK_OVERLAP, duration - chunk_offset)
+        log.info("Detected language: %s (probability: %.2f)",
+                 info.language, info.language_probability)
 
-                # Create a wrapper callback that adds the chunk offset to progress
-                chunk_progress_callback = None
-                if progress_callback:
-                    def make_callback(offset: float, total: float):
-                        def callback(current_secs: float, _chunk_total: float):
-                            # Report cumulative progress: chunk offset + position within chunk
-                            progress_callback(offset + current_secs, total)
-                        return callback
-                    chunk_progress_callback = make_callback(chunk_offset, duration)
-
-                t_chunk = time.monotonic()
-                text = _transcribe_single(chunk_path, chunk_duration, chunk_progress_callback)
-                chunk_elapsed = time.monotonic() - t_chunk
-
+        # Collect segments and report progress
+        texts = []
+        for segment in segments:
+            text = segment.text.strip()
+            if text:
                 texts.append(text)
-                log.info("Chunk %d/%d done in %s (%d chars)",
-                         chunk_num, total_chunks, _fmt_duration(chunk_elapsed), len(text))
+                # Print segment for docker logs (same format as before)
+                start_str = _format_timestamp(segment.start)
+                end_str = _format_timestamp(segment.end)
+                print(f"[{start_str} --> {end_str}] {text}", flush=True)
 
-                # Clean up chunk immediately after transcription
-                try:
-                    os.unlink(chunk_path)
-                except OSError:
-                    pass
+                # Report progress
+                if progress_callback and duration > 0:
+                    progress_callback(segment.end, duration)
 
-            # Mark chunk_paths as cleaned so finally block doesn't double-delete
-            chunk_paths = []
+        # Report final progress
+        if progress_callback and duration > 0:
+            progress_callback(duration, duration)
 
-            # Report final progress
-            if progress_callback:
-                progress_callback(duration, duration)
+        total_elapsed = time.monotonic() - t_total
+        full_text = " ".join(texts)
 
-            total_elapsed = time.monotonic() - t_total
-            full_text = " ".join(texts)
-            log.info("Transcription complete: %s, %d chunks in %s, %d chars total",
-                     file_name, total_chunks, _fmt_duration(total_elapsed), len(full_text))
-            _log_gpu_mem()
-            return full_text
+        # Calculate speed ratio
+        if total_elapsed > 0 and duration > 0:
+            speed_ratio = duration / total_elapsed
+            log.info("Transcription complete: %s in %s (%d chars, %.1fx realtime)",
+                     file_name, _fmt_duration(total_elapsed), len(full_text), speed_ratio)
         else:
-            # Short file -> transcribe directly
-            _log_gpu_mem()
-            text = _transcribe_single(audio_path, duration, progress_callback)
-
-            total_elapsed = time.monotonic() - t_total
             log.info("Transcription complete: %s in %s (%d chars)",
-                     file_name, _fmt_duration(total_elapsed), len(text))
-            _log_gpu_mem()
-            return text
+                     file_name, _fmt_duration(total_elapsed), len(full_text))
+
+        _log_gpu_mem()
+        return full_text
 
     except Exception:
         total_elapsed = time.monotonic() - t_total
@@ -392,12 +251,18 @@ def transcribe_file(
                 os.unlink(audio_path)
             except OSError:
                 pass
-        # Clean up any remaining chunk files (in case of error)
-        for p in chunk_paths:
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
+
+
+def _format_timestamp(seconds: float) -> str:
+    """Format seconds as MM:SS.mmm or HH:MM:SS.mmm timestamp."""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int((seconds % 1) * 1000)
+
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{secs:02d}.{millis:03d}"
+    return f"{minutes:02d}:{secs:02d}.{millis:03d}"
 
 
 def get_gpu_info() -> dict:
@@ -405,13 +270,16 @@ def get_gpu_info() -> dict:
     info = {
         "device": get_device(),
         "model_loaded": _model_ready.is_set(),
-        "model_name": f"whisper-{WHISPER_MODEL}",
+        "model_name": f"faster-whisper-{WHISPER_MODEL}",
+        "compute_type": COMPUTE_TYPE,
+        "batch_size": BATCH_SIZE,
     }
     try:
+        import torch
         if torch.cuda.is_available():
             info["gpu_name"] = torch.cuda.get_device_name(0)
             mem = torch.cuda.get_device_properties(0).total_memory
             info["gpu_memory_total"] = f"{mem / 1024**3:.1f} GB"
-    except Exception:
+    except (ImportError, Exception):
         pass
     return info

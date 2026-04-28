@@ -6,8 +6,8 @@ RUN bun install
 COPY frontend/ .
 RUN bun run build
 
-# Stage 2: Python runtime with CUDA
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+# Stage 2: Python runtime with CUDA + cuDNN (required by CTranslate2/faster-whisper)
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 WORKDIR /app
 
@@ -24,8 +24,8 @@ RUN apt-get update && apt-get install -y \
 # Install uv for fast dependency resolution
 RUN pip install uv
 
-# Copy and install Python dependencies with uv (pre-resolved lockfile)
-COPY backend/pyproject.toml backend/uv.lock ./
+# Copy and install Python dependencies with uv
+COPY backend/pyproject.toml ./
 RUN uv pip install --system --no-cache -r pyproject.toml
 
 # Copy backend code
