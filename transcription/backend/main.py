@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import aiofiles
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
@@ -187,10 +187,28 @@ async def get_transcriptions() -> list[SavedTranscription]:
     return load_transcriptions()
 
 
+@app.get("/api/transcriptions/{transcription_id}")
+async def get_transcription(transcription_id: str) -> SavedTranscription:
+    """Get a specific saved transcription by ID."""
+    for t in load_transcriptions():
+        if t.id == transcription_id:
+            return t
+    raise HTTPException(status_code=404, detail="Transcription not found")
+
+
 @app.get("/api/jobs")
 async def get_jobs() -> list[ActiveJobInfo]:
     """Get all active (queued/in-progress) jobs."""
     return [job.to_info() for job in active_jobs.values()]
+
+
+@app.get("/api/jobs/{file_id}")
+async def get_job(file_id: str) -> ActiveJobInfo:
+    """Get a specific active job by file_id."""
+    job = active_jobs.get(file_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job.to_info()
 
 
 @app.delete("/api/transcriptions/{transcription_id}")
