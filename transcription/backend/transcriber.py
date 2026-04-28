@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import subprocess
-import tempfile
 import threading
 import time
 import traceback
@@ -13,9 +12,6 @@ from faster_whisper import BatchedInferencePipeline, WhisperModel
 from models import GpuInfo
 
 log = logging.getLogger("whisper")
-
-# Video extensions that need audio extraction
-VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".flv", ".wmv"}
 
 # Model configuration
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3")
@@ -108,29 +104,6 @@ def get_audio_duration(file_path: str) -> float:
     return 0.0
 
 
-def extract_audio_from_video(video_path: str) -> str:
-    """Extract audio from video file using ffmpeg, returns path to temp wav file."""
-    t0 = time.monotonic()
-    temp_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)  # noqa: SIM115
-    temp_audio.close()
-
-    cmd = [
-        "ffmpeg", "-y", "-i", video_path,
-        "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
-        temp_audio.name,
-    ]
-
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        os.unlink(temp_audio.name)
-        raise RuntimeError(f"ffmpeg error: {result.stderr}")
-
-    elapsed = time.monotonic() - t0
-    wav_size = os.path.getsize(temp_audio.name)
-    log.info("Audio extracted in %s, WAV size: %s", _fmt_duration(elapsed), _fmt_size(wav_size))
-
-    return temp_audio.name
-
 
 def _log_gpu_mem() -> None:
     """Log current GPU memory usage (one line)."""
@@ -175,34 +148,24 @@ def transcribe_file(
     file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
     log.info("Starting: %s (%s)", file_name, _fmt_size(file_size))
 
-    ext = os.path.splitext(file_path)[1].lower()
-    cleanup_audio = False
     t_total = time.monotonic()
 
     try:
-        # Step 1: Extract audio if video
-        if ext in VIDEO_EXTENSIONS:
-            log.info("Extracting audio from video...")
-            audio_path = extract_audio_from_video(file_path)
-            cleanup_audio = True
-        else:
-            audio_path = file_path
-
-        # Step 2: Get duration for progress calculation
-        duration = get_audio_duration(audio_path)
+        # Step 1: Get duration for progress calculation
+        duration = get_audio_duration(file_path)
         log.info("Duration: %s", _fmt_duration(duration))
 
         _log_gpu_mem()
 
-        # Step 3: Transcribe using batched inference pipeline
-        # faster-whisper handles chunking internally - no need for manual splitting
+        # Step 2: Transcribe using batched inference pipeline
+        # faster-whisper accepts video/audio directly via its internal ffmpeg decoder
         log.info("Transcribing with batched inference (batch_size=%d)...", BATCH_SIZE)
 
         if _batched_model is None:
             raise RuntimeError("Model not loaded")
 
         segments, info = _batched_model.transcribe(
-            audio_path,
+            file_path,
             language="en",
             batch_size=BATCH_SIZE,
             beam_size=5,
@@ -267,13 +230,6 @@ def transcribe_file(
         traceback.print_exc()
         raise
 
-    finally:
-        # Clean up extracted audio
-        if cleanup_audio:
-            try:
-                os.unlink(audio_path)
-            except OSError:
-                pass
 
 
 def _format_timestamp(seconds: float) -> str:
