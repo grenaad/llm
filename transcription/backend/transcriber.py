@@ -2,14 +2,15 @@ import json
 import logging
 import os
 import subprocess
-import sys
 import tempfile
 import threading
 import time
 import traceback
-from typing import Callable, Optional
+from collections.abc import Callable
 
-from faster_whisper import WhisperModel, BatchedInferencePipeline
+from faster_whisper import BatchedInferencePipeline, WhisperModel
+
+from models import GpuInfo
 
 log = logging.getLogger("whisper")
 
@@ -67,7 +68,7 @@ def is_model_ready() -> bool:
     return _model_ready.is_set()
 
 
-def load_model():
+def load_model() -> None:
     """Load the Whisper model using faster-whisper. Called once at startup."""
     global _model, _batched_model
     device = get_device()
@@ -110,7 +111,7 @@ def get_audio_duration(file_path: str) -> float:
 def extract_audio_from_video(video_path: str) -> str:
     """Extract audio from video file using ffmpeg, returns path to temp wav file."""
     t0 = time.monotonic()
-    temp_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    temp_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)  # noqa: SIM115
     temp_audio.close()
 
     cmd = [
@@ -131,7 +132,7 @@ def extract_audio_from_video(video_path: str) -> str:
     return temp_audio.name
 
 
-def _log_gpu_mem():
+def _log_gpu_mem() -> None:
     """Log current GPU memory usage (one line)."""
     try:
         import torch
@@ -149,7 +150,7 @@ ProgressCallback = Callable[[float, float], None]
 
 def transcribe_file(
     file_path: str,
-    progress_callback: Optional[ProgressCallback] = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> str:
     """Transcribe a single audio/video file using faster-whisper with batched inference.
 
@@ -190,6 +191,9 @@ def transcribe_file(
         # Step 3: Transcribe using batched inference pipeline
         # faster-whisper handles chunking internally - no need for manual splitting
         log.info("Transcribing with batched inference (batch_size=%d)...", BATCH_SIZE)
+
+        if _batched_model is None:
+            raise RuntimeError("Model not loaded")
 
         segments, info = _batched_model.transcribe(
             audio_path,
@@ -265,15 +269,10 @@ def _format_timestamp(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}.{millis:03d}"
 
 
-def get_gpu_info() -> dict:
+def get_gpu_info() -> GpuInfo:
     """Return GPU information for the status endpoint."""
-    info = {
-        "device": get_device(),
-        "model_loaded": _model_ready.is_set(),
-        "model_name": f"faster-whisper-{WHISPER_MODEL}",
-        "compute_type": COMPUTE_TYPE,
-        "batch_size": BATCH_SIZE,
-    }
+    gpu_name: str | None = None
+    gpu_memory_total: str | None = None
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.total",
@@ -282,8 +281,17 @@ def get_gpu_info() -> dict:
         )
         if result.returncode == 0:
             parts = result.stdout.strip().split(", ")
-            info["gpu_name"] = parts[0]
-            info["gpu_memory_total"] = f"{int(parts[1]) / 1024:.1f} GB"
+            gpu_name = parts[0]
+            gpu_memory_total = f"{int(parts[1]) / 1024:.1f} GB"
     except Exception:
         pass
-    return info
+
+    return GpuInfo(
+        device=get_device(),
+        model_loaded=_model_ready.is_set(),
+        model_name=f"faster-whisper-{WHISPER_MODEL}",
+        compute_type=COMPUTE_TYPE,
+        batch_size=BATCH_SIZE,
+        gpu_name=gpu_name,
+        gpu_memory_total=gpu_memory_total,
+    )

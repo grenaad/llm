@@ -15,7 +15,31 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 
-from transcriber import load_model, transcribe_file, get_gpu_info, is_model_ready, _fmt_size, _fmt_duration
+from models import (
+    ActiveJob,
+    ActiveJobInfo,
+    DeleteCountResponse,
+    DeleteResponse,
+    GpuInfo,
+    SavedTranscription,
+    TranscribeRequest,
+    TranscribeResponse,
+    UploadResponse,
+    WsCancelled,
+    WsFileError,
+    WsFileProgress,
+    WsFileResult,
+    WsFileStatus,
+    WsMessage,
+)
+from transcriber import (
+    _fmt_duration,
+    _fmt_size,
+    get_gpu_info,
+    is_model_ready,
+    load_model,
+    transcribe_file,
+)
 
 # --- Logging setup ---
 logging.basicConfig(
@@ -41,38 +65,43 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 
 # --- JSON Storage Helpers ---
-def load_transcriptions() -> list[dict]:
+def load_transcriptions() -> list[SavedTranscription]:
     """Load all transcriptions from JSON file."""
     if not TRANSCRIPTIONS_FILE.exists():
         return []
     try:
-        return json.loads(TRANSCRIPTIONS_FILE.read_text())
-    except (json.JSONDecodeError, IOError):
+        raw = json.loads(TRANSCRIPTIONS_FILE.read_text())
+        return [SavedTranscription(**t) for t in raw]
+    except (OSError, json.JSONDecodeError):
         return []
 
 
-def save_transcription(id: str, name: str, text: str, size: int) -> dict:
+def save_transcription(id: str, name: str, text: str, size: int) -> SavedTranscription:
     """Save a transcription to JSON file."""
     transcriptions = load_transcriptions()
-    entry = {
-        "id": id,
-        "name": name,
-        "text": text,
-        "size": size,
-        "created_at": datetime.utcnow().isoformat() + "Z",
-    }
+    entry = SavedTranscription(
+        id=id,
+        name=name,
+        text=text,
+        size=size,
+        created_at=datetime.utcnow().isoformat() + "Z",
+    )
     transcriptions.append(entry)
-    TRANSCRIPTIONS_FILE.write_text(json.dumps(transcriptions, indent=2))
+    TRANSCRIPTIONS_FILE.write_text(
+        json.dumps([t.model_dump() for t in transcriptions], indent=2)
+    )
     return entry
 
 
 def delete_transcription_by_id(id: str) -> bool:
     """Delete a transcription by ID."""
     transcriptions = load_transcriptions()
-    filtered = [t for t in transcriptions if t["id"] != id]
+    filtered = [t for t in transcriptions if t.id != id]
     if len(filtered) == len(transcriptions):
         return False
-    TRANSCRIPTIONS_FILE.write_text(json.dumps(filtered, indent=2))
+    TRANSCRIPTIONS_FILE.write_text(
+        json.dumps([t.model_dump() for t in filtered], indent=2)
+    )
     return True
 
 
@@ -86,27 +115,28 @@ def delete_all_transcriptions() -> int:
 # --- Global state ---
 # Job registry: tracks all queued/in-progress transcription jobs.
 # Jobs survive WebSocket disconnects (page refresh) and continue processing.
-active_jobs: dict[str, dict] = {}
+active_jobs: dict[str, ActiveJob] = {}
 
 # Connected WebSocket clients. Progress/status is broadcast to ALL clients.
 connected_clients: set[WebSocket] = set()
 
 # Transcription queue: only one job runs at a time on the GPU.
-transcription_queue: asyncio.Queue = asyncio.Queue()
+transcription_queue: asyncio.Queue[str] = asyncio.Queue()
 
 
-async def broadcast(message: dict):
+async def broadcast(message: WsMessage) -> None:
     """Send a message to all connected WebSocket clients."""
+    data = message.model_dump()
     disconnected = set()
     for client in connected_clients:
         try:
-            await client.send_json(message)
+            await client.send_json(data)
         except Exception:
             disconnected.add(client)
     connected_clients.difference_update(disconnected)
 
 
-async def global_transcription_worker():
+async def global_transcription_worker() -> None:
     """Process transcription jobs one at a time, globally.
 
     Each job is a (file_id,) tuple. Job details are in active_jobs.
@@ -122,7 +152,7 @@ async def global_transcription_worker():
 
         remaining = transcription_queue.qsize()
         log.info("Transcription starting: %s (%d more in queue)",
-                 job["name"], remaining)
+                 job.name, remaining)
         try:
             await process_file(file_id)
         except Exception:
@@ -136,7 +166,7 @@ app = FastAPI(title="Whisper Transcription")
 
 
 @app.on_event("startup")
-async def startup():
+async def startup() -> None:
     import threading
     threading.Thread(target=load_model, daemon=True, name="model-loader").start()
     log.info("Server ready, model loading in background")
@@ -145,49 +175,38 @@ async def startup():
 
 # --- API routes ---
 @app.get("/api/status")
-async def status():
+async def status() -> GpuInfo:
     return get_gpu_info()
 
 
 @app.get("/api/transcriptions")
-async def get_transcriptions():
+async def get_transcriptions() -> list[SavedTranscription]:
     """Get all saved transcriptions."""
     return load_transcriptions()
 
 
 @app.get("/api/jobs")
-async def get_jobs():
+async def get_jobs() -> list[ActiveJobInfo]:
     """Get all active (queued/in-progress) jobs."""
-    return [
-        {
-            "id": job["id"],
-            "name": job["name"],
-            "path": job["path"],
-            "size": job["size"],
-            "status": job["status"],
-            "progress_seconds": job.get("progress_seconds"),
-            "total_seconds": job.get("total_seconds"),
-        }
-        for job in active_jobs.values()
-    ]
+    return [job.to_info() for job in active_jobs.values()]
 
 
 @app.delete("/api/transcriptions/{transcription_id}")
-async def delete_transcription_endpoint(transcription_id: str):
+async def delete_transcription_endpoint(transcription_id: str) -> DeleteResponse:
     """Delete a specific transcription."""
     deleted = delete_transcription_by_id(transcription_id)
-    return {"deleted": deleted}
+    return DeleteResponse(deleted=deleted)
 
 
 @app.delete("/api/transcriptions")
-async def delete_all_transcriptions_endpoint():
+async def delete_all_transcriptions_endpoint() -> DeleteCountResponse:
     """Delete all transcriptions."""
     count = delete_all_transcriptions()
-    return {"deleted": count}
+    return DeleteCountResponse(deleted=count)
 
 
 @app.post("/api/upload/{filename:path}")
-async def upload_file(filename: str, request: Request):
+async def upload_file(filename: str, request: Request) -> UploadResponse:
     """Upload a single file as raw binary stream (no multipart overhead).
 
     The browser sends the file body directly as application/octet-stream.
@@ -213,81 +232,72 @@ async def upload_file(filename: str, request: Request):
              safe_name, _fmt_size(bytes_written), _fmt_duration(elapsed),
              _fmt_size(int(speed)))
 
-    return {
-        "id": file_id,
-        "name": safe_name,
-        "path": str(dest),
-        "size": bytes_written,
-    }
+    return UploadResponse(
+        id=file_id,
+        name=safe_name,
+        path=str(dest),
+        size=bytes_written,
+    )
 
 
 @app.post("/api/transcribe")
-async def submit_transcription(request: Request):
-    """Submit a file for transcription. Registers the job and queues it.
-
-    Expects JSON body: { "file_id": "...", "file_name": "...", "file_path": "...", "file_size": 0 }
-    """
-    data = await request.json()
-    file_id = data["file_id"]
-    file_name = data["file_name"]
-    file_path = data["file_path"]
-    file_size = data.get("file_size", 0)
-
-    # Create job in global registry
-    cancel_flag = asyncio.Event()
-    active_jobs[file_id] = {
-        "id": file_id,
-        "name": file_name,
-        "path": file_path,
-        "size": file_size,
-        "status": "waiting",
-        "cancel_flag": cancel_flag,
-    }
+async def submit_transcription(body: TranscribeRequest) -> TranscribeResponse:
+    """Submit a file for transcription. Registers the job and queues it."""
+    job = ActiveJob(
+        id=body.file_id,
+        name=body.file_name,
+        path=body.file_path,
+        size=body.file_size,
+    )
+    active_jobs[body.file_id] = job
 
     # Add to global queue
-    await transcription_queue.put(file_id)
-    log.info("Queued: %s (global queue depth: %d)", file_name, transcription_queue.qsize())
+    await transcription_queue.put(body.file_id)
+    log.info("Queued: %s (global queue depth: %d)", body.file_name, transcription_queue.qsize())
 
     # Broadcast status to all connected clients
-    await broadcast({
-        "type": "file_status",
-        "file_id": file_id,
-        "name": file_name,
-        "status": "waiting",
-    })
+    await broadcast(WsFileStatus(
+        file_id=body.file_id,
+        name=body.file_name,
+        status="waiting",
+    ))
 
-    return {"queued": True, "file_id": file_id}
+    return TranscribeResponse(queued=True, file_id=body.file_id)
 
 
 @app.delete("/api/files/{file_id}")
-async def delete_file(file_id: str):
+async def delete_file(file_id: str) -> DeleteResponse:
     """Delete an uploaded file."""
     for path in UPLOAD_DIR.glob(f"{file_id}_*"):
         path.unlink(missing_ok=True)
-        return {"deleted": True}
-    return {"deleted": False}
+        return DeleteResponse(deleted=True)
+    return DeleteResponse(deleted=False)
 
 
 @app.websocket("/api/ws")
-async def websocket_endpoint(ws: WebSocket):
+async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     connected_clients.add(ws)
     log.info("WebSocket connected (%d clients)", len(connected_clients))
 
     # Send current state of all active jobs to the newly connected client
     for job in active_jobs.values():
-        msg: dict = {
-            "type": "file_status",
-            "file_id": job["id"],
-            "name": job["name"],
-            "status": job["status"],
-        }
-        if job.get("progress_seconds") is not None:
-            msg["type"] = "file_progress"
-            msg["progress_seconds"] = job["progress_seconds"]
-            msg["total_seconds"] = job.get("total_seconds")
+        ws_msg: WsFileProgress | WsFileStatus
+        if job.progress_seconds is not None:
+            ws_msg = WsFileProgress(
+                file_id=job.id,
+                name=job.name,
+                progress_seconds=job.progress_seconds,
+                total_seconds=job.total_seconds or 0.0,
+            )
+        else:
+            ws_msg = WsFileStatus(
+                file_id=job.id,
+                name=job.name,
+                status=job.status,
+            )
         try:
-            await ws.send_json(msg)
+            await ws.send_json(ws_msg.model_dump())
         except Exception:
             pass
 
@@ -297,20 +307,18 @@ async def websocket_endpoint(ws: WebSocket):
             msg_type = data.get("type")
 
             if msg_type == "cancel":
-                file_id = data.get("file_id")
-                job = active_jobs.get(file_id)
-                if job:
-                    job["cancel_flag"].set()
-                    log.info("Cancel requested: %s", file_id)
-                    # Immediately notify all clients
-                    await broadcast({
-                        "type": "cancelled",
-                        "file_id": file_id,
-                    })
+                cancel_file_id: str | None = data.get("file_id")
+                if cancel_file_id is not None:
+                    cancel_job = active_jobs.get(cancel_file_id)
+                    if cancel_job:
+                        cancel_job.cancel_flag.set()
+                        log.info("Cancel requested: %s", cancel_file_id)
+                        # Immediately notify all clients
+                        await broadcast(WsCancelled(file_id=cancel_file_id))
 
             elif msg_type == "cancel_all":
-                for job in active_jobs.values():
-                    job["cancel_flag"].set()
+                for active_job in active_jobs.values():
+                    active_job.cancel_flag.set()
                 log.info("Cancel all requested (%d jobs)", len(active_jobs))
 
     except WebSocketDisconnect:
@@ -324,7 +332,7 @@ async def websocket_endpoint(ws: WebSocket):
         traceback.print_exc()
 
 
-async def process_file(file_id: str):
+async def process_file(file_id: str) -> None:
     """Transcribe a single file with chunk progress reporting.
 
     Uses the global active_jobs registry and broadcasts status/progress
@@ -334,74 +342,62 @@ async def process_file(file_id: str):
     if not job:
         return
 
-    cancel_flag: asyncio.Event = job["cancel_flag"]
-    file_name = job["name"]
-    file_path = job["path"]
+    file_name = job.name
+    file_path = job.path
 
     try:
         # Check cancellation before starting
-        if cancel_flag.is_set():
+        if job.cancel_flag.is_set():
             log.info("Skipped (cancelled): %s", file_name)
-            await broadcast({
-                "type": "cancelled",
-                "file_id": file_id,
-                "name": file_name,
-            })
+            await broadcast(WsCancelled(file_id=file_id, name=file_name))
             return
 
         # Check if model is still loading
         if not is_model_ready():
             log.info("Waiting for model: %s", file_name)
-            job["status"] = "loading_model"
-            await broadcast({
-                "type": "file_status",
-                "file_id": file_id,
-                "name": file_name,
-                "status": "loading_model",
-            })
+            job.status = "loading_model"
+            await broadcast(WsFileStatus(
+                file_id=file_id,
+                name=file_name,
+                status="loading_model",
+            ))
 
             # Wait for model in async-friendly way (allows cancellation)
             while not is_model_ready():
-                if cancel_flag.is_set():
+                if job.cancel_flag.is_set():
                     log.info("Cancelled while waiting for model: %s", file_name)
-                    await broadcast({
-                        "type": "cancelled",
-                        "file_id": file_id,
-                        "name": file_name,
-                    })
+                    await broadcast(WsCancelled(file_id=file_id, name=file_name))
                     return
                 await asyncio.sleep(0.5)  # Check every 500ms
 
             log.info("Model ready, starting: %s", file_name)
 
         # Update status: transcribing
-        job["status"] = "transcribing"
-        await broadcast({
-            "type": "file_status",
-            "file_id": file_id,
-            "name": file_name,
-            "status": "transcribing",
-        })
+        job.status = "transcribing"
+        await broadcast(WsFileStatus(
+            file_id=file_id,
+            name=file_name,
+            status="transcribing",
+        ))
 
         # Create a progress callback that broadcasts to all clients.
         # Since transcribe_file runs in a thread pool, we need to use
         # run_coroutine_threadsafe to send messages from the thread.
         loop = asyncio.get_event_loop()
 
-        def progress_callback(current_seconds: float, total_seconds: float):
+        def progress_callback(current_seconds: float, total_seconds: float) -> None:
             """Called from the transcription thread as segments complete."""
             # Update job registry for new clients connecting mid-transcription
-            job["progress_seconds"] = current_seconds
-            job["total_seconds"] = total_seconds
+            job.progress_seconds = current_seconds
+            job.total_seconds = total_seconds
 
             future = asyncio.run_coroutine_threadsafe(
-                broadcast({
-                    "type": "file_progress",
-                    "file_id": file_id,
-                    "name": file_name,
-                    "progress_seconds": current_seconds,
-                    "total_seconds": total_seconds,
-                }),
+                broadcast(WsFileProgress(
+                    file_id=file_id,
+                    name=file_name,
+                    progress_seconds=current_seconds,
+                    total_seconds=total_seconds,
+                )),
                 loop,
             )
             try:
@@ -417,19 +413,15 @@ async def process_file(file_id: str):
         elapsed = time.monotonic() - t0
 
         # Check cancellation after transcription
-        if cancel_flag.is_set():
+        if job.cancel_flag.is_set():
             log.info("Cancelled after transcription: %s", file_name)
-            await broadcast({
-                "type": "cancelled",
-                "file_id": file_id,
-                "name": file_name,
-            })
+            await broadcast(WsCancelled(file_id=file_id, name=file_name))
         else:
             # Get file size before cleanup
             try:
                 file_size = Path(file_path).stat().st_size
             except Exception:
-                file_size = job.get("size", 0)
+                file_size = job.size
 
             # Save to persistent storage
             save_transcription(
@@ -441,22 +433,20 @@ async def process_file(file_id: str):
 
             log.info("Result sent: %s (%d chars, %s)",
                      file_name, len(text), _fmt_duration(elapsed))
-            await broadcast({
-                "type": "file_result",
-                "file_id": file_id,
-                "name": file_name,
-                "text": text,
-            })
+            await broadcast(WsFileResult(
+                file_id=file_id,
+                name=file_name,
+                text=text,
+            ))
 
     except Exception as e:
         log.error("Transcription error: %s - %s", file_name, e)
         traceback.print_exc()
-        await broadcast({
-            "type": "file_error",
-            "file_id": file_id,
-            "name": file_name,
-            "error": str(e),
-        })
+        await broadcast(WsFileError(
+            file_id=file_id,
+            name=file_name,
+            error=str(e),
+        ))
 
     finally:
         # Remove from active jobs
@@ -473,7 +463,7 @@ if STATIC_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
 
     @app.get("/{path:path}")
-    async def serve_frontend(path: str = ""):
+    async def serve_frontend(path: str = "") -> FileResponse:
         file_path = STATIC_DIR / path
         if file_path.is_file():
             return FileResponse(file_path)

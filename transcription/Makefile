@@ -5,7 +5,7 @@ IMAGE_NAME := whisper-webui
 CONTAINER_NAME := whisper-web
 PORT := 7001
 
-.PHONY: build run start stop restart logs clean shell status gpu rebuild
+.PHONY: build run start stop restart logs clean shell status gpu rebuild lint typecheck check
 
 # Default target - start existing container
 .DEFAULT_GOAL := start
@@ -67,6 +67,18 @@ gpu:
 rebuild:
 	docker build --no-cache --network=host -t $(IMAGE_NAME) .
 
+# Lint with ruff
+lint:
+	uvx ruff check backend/
+
+# Type-check with mypy (strict)
+typecheck:
+	uvx --with pydantic --with fastapi --with types-aiofiles --with uvicorn \
+		mypy --strict --config-file backend/pyproject.toml backend/
+
+# Run both lint and type-check
+check: lint typecheck
+
 # Help
 help:
 	@echo "Whisper ASR Makefile"
@@ -85,4 +97,7 @@ help:
 	@echo "  build    Build Docker image"
 	@echo "  rebuild  Force rebuild without cache"
 	@echo "  gpu      Show GPU usage (nvidia-smi)"
+	@echo "  lint     Run ruff linter on backend"
+	@echo "  typecheck Run mypy strict on backend"
+	@echo "  check    Run lint + typecheck"
 	@echo "  help     Show this help"
