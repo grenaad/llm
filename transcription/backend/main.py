@@ -18,9 +18,11 @@ from starlette.requests import Request
 from models import (
     ActiveJob,
     ActiveJobInfo,
+    ClientMsgType,
     DeleteCountResponse,
     DeleteResponse,
     GpuInfo,
+    JobStatus,
     SavedTranscription,
     TranscribeRequest,
     TranscribeResponse,
@@ -259,7 +261,7 @@ async def submit_transcription(body: TranscribeRequest) -> TranscribeResponse:
     await broadcast(WsFileStatus(
         file_id=body.file_id,
         name=body.file_name,
-        status="waiting",
+        status=JobStatus.WAITING,
     ))
 
     return TranscribeResponse(queued=True, file_id=body.file_id)
@@ -306,7 +308,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             data = await ws.receive_json()
             msg_type = data.get("type")
 
-            if msg_type == "cancel":
+            if msg_type == ClientMsgType.CANCEL:
                 cancel_file_id: str | None = data.get("file_id")
                 if cancel_file_id is not None:
                     cancel_job = active_jobs.get(cancel_file_id)
@@ -316,9 +318,13 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                         # Immediately notify all clients
                         await broadcast(WsCancelled(file_id=cancel_file_id))
 
-            elif msg_type == "cancel_all":
+            elif msg_type == ClientMsgType.CANCEL_ALL:
                 for active_job in active_jobs.values():
                     active_job.cancel_flag.set()
+                    await broadcast(WsCancelled(
+                        file_id=active_job.id,
+                        name=active_job.name,
+                    ))
                 log.info("Cancel all requested (%d jobs)", len(active_jobs))
 
     except WebSocketDisconnect:
@@ -355,11 +361,11 @@ async def process_file(file_id: str) -> None:
         # Check if model is still loading
         if not is_model_ready():
             log.info("Waiting for model: %s", file_name)
-            job.status = "loading_model"
+            job.status = JobStatus.LOADING_MODEL
             await broadcast(WsFileStatus(
                 file_id=file_id,
                 name=file_name,
-                status="loading_model",
+                status=JobStatus.LOADING_MODEL,
             ))
 
             # Wait for model in async-friendly way (allows cancellation)
@@ -373,11 +379,11 @@ async def process_file(file_id: str) -> None:
             log.info("Model ready, starting: %s", file_name)
 
         # Update status: transcribing
-        job.status = "transcribing"
+        job.status = JobStatus.TRANSCRIBING
         await broadcast(WsFileStatus(
             file_id=file_id,
             name=file_name,
-            status="transcribing",
+            status=JobStatus.TRANSCRIBING,
         ))
 
         # Create a progress callback that broadcasts to all clients.
@@ -408,7 +414,7 @@ async def process_file(file_id: str) -> None:
         # Run transcription in a thread pool
         t0 = time.monotonic()
         text = await loop.run_in_executor(
-            None, transcribe_file, file_path, progress_callback
+            None, transcribe_file, file_path, progress_callback, job.cancel_flag.is_set
         )
         elapsed = time.monotonic() - t0
 

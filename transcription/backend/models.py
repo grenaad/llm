@@ -6,10 +6,33 @@ Covers API request/response models, internal job state, and WebSocket messages.
 from __future__ import annotations
 
 import asyncio
+from enum import Enum
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+
+
+class JobStatus(str, Enum):
+    """Status of a transcription job in the processing pipeline."""
+
+    WAITING = "waiting"
+    LOADING_MODEL = "loading_model"
+    TRANSCRIBING = "transcribing"
+
+
+class ClientMsgType(str, Enum):
+    """WebSocket message types sent from client to server."""
+
+    CANCEL = "cancel"
+    CANCEL_ALL = "cancel_all"
+
+
+# ---------------------------------------------------------------------------
+# API response models
 # ---------------------------------------------------------------------------
 # API response models
 # ---------------------------------------------------------------------------
@@ -48,7 +71,7 @@ class ActiveJobInfo(BaseModel):
     name: str
     path: str
     size: int
-    status: str
+    status: JobStatus
     progress_seconds: float | None = None
     total_seconds: float | None = None
 
@@ -101,7 +124,7 @@ class ActiveJob(BaseModel):
     name: str
     path: str
     size: int
-    status: str = "waiting"
+    status: JobStatus = JobStatus.WAITING
     cancel_flag: asyncio.Event = Field(default_factory=asyncio.Event)
     progress_seconds: float | None = None
     total_seconds: float | None = None
@@ -128,7 +151,7 @@ class WsFileStatus(BaseModel):
     type: Literal["file_status"] = "file_status"
     file_id: str
     name: str
-    status: str
+    status: JobStatus
 
 
 class WsFileProgress(BaseModel):

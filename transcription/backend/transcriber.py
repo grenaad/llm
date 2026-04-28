@@ -148,9 +148,13 @@ def _log_gpu_mem() -> None:
 ProgressCallback = Callable[[float, float], None]
 
 
+CancelCheck = Callable[[], bool]
+
+
 def transcribe_file(
     file_path: str,
     progress_callback: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
 ) -> str:
     """Transcribe a single audio/video file using faster-whisper with batched inference.
 
@@ -158,6 +162,8 @@ def transcribe_file(
         file_path: Path to the audio/video file.
         progress_callback: Called with (current_seconds, total_seconds) as
             segments are transcribed. Optional.
+        cancel_check: Called between segments; returns True if cancelled.
+            Stops processing remaining segments early. Optional.
     """
     if not _model_ready.is_set():
         log.info("Model still loading, waiting...")
@@ -209,7 +215,14 @@ def transcribe_file(
 
         # Collect segments and report progress
         texts = []
+        cancelled = False
         for segment in segments:
+            # Check for cancellation between segments
+            if cancel_check and cancel_check():
+                log.info("Transcription cancelled mid-stream: %s", file_name)
+                cancelled = True
+                break
+
             text = segment.text.strip()
             if text:
                 texts.append(text)
@@ -221,6 +234,12 @@ def transcribe_file(
                 # Report progress
                 if progress_callback and duration > 0:
                     progress_callback(segment.end, duration)
+
+        if cancelled:
+            total_elapsed = time.monotonic() - t_total
+            log.info("Cancelled: %s after %s", file_name, _fmt_duration(total_elapsed))
+            _log_gpu_mem()
+            return ""
 
         # Report final progress
         if progress_callback and duration > 0:
