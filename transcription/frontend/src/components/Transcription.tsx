@@ -7,23 +7,24 @@ interface TranscriptionProps {
   files: TranscriptionFile[];
 }
 
+// Toast state - shared across all ResultCards
+const [toastMessage, setToastMessage] = createSignal<string | null>(null);
+let toastTimeout: number | undefined;
+
+const showToast = (message: string) => {
+  if (toastTimeout) clearTimeout(toastTimeout);
+  setToastMessage(message);
+  toastTimeout = window.setTimeout(() => setToastMessage(null), 3000);
+};
+
 export default function Transcription(props: TranscriptionProps) {
   const completedFiles = () => props.files.filter((f) => f.status === FileStatus.Done && f.text);
   const hasResults = () => completedFiles().length > 0;
 
-  const allPlainText = () =>
-    completedFiles()
-      .map((f) => `${f.name}\n${f.text}`)
-      .join("\n\n---\n\n");
-
-  const allMarkdown = () =>
-    completedFiles()
-      .map((f) => `### ${f.name}\n\n${f.text}`)
-      .join("\n\n---\n\n");
-
   const copyToClipboard = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
+      showToast("Copied to clipboard");
     } catch {
       // Fallback: create textarea
       const ta = document.createElement("textarea");
@@ -32,45 +33,14 @@ export default function Transcription(props: TranscriptionProps) {
       ta.select();
       document.execCommand("copy");
       document.body.removeChild(ta);
+      showToast("Copied to clipboard");
     }
-  };
-
-  const downloadTxt = () => {
-    const text = allPlainText();
-    const blob = new Blob([text], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "transcription.txt";
-    a.click();
-    URL.revokeObjectURL(url);
   };
 
   return (
     <Show when={hasResults()}>
       <div class={styles.resultsSection}>
-        <div class={styles.resultsSectionHeader}>
-          <h2 class={styles.sectionTitle}>Results</h2>
-          <div class={styles.resultsActions}>
-            <button
-              class={styles.btnSecondary}
-              onClick={() => copyToClipboard(allPlainText())}
-              title="Copy as plain text"
-            >
-              <CopyIcon /> Text
-            </button>
-            <button
-              class={styles.btnSecondary}
-              onClick={() => copyToClipboard(allMarkdown())}
-              title="Copy as markdown"
-            >
-              <CopyIcon /> Markdown
-            </button>
-            <button class={styles.btnSecondary} onClick={downloadTxt} title="Download as .txt">
-              <DownloadIcon /> Download
-            </button>
-          </div>
-        </div>
+        <h2 class={styles.sectionTitle}>Results</h2>
 
         <div class={styles.resultsList}>
           <For each={completedFiles()}>
@@ -78,6 +48,11 @@ export default function Transcription(props: TranscriptionProps) {
           </For>
         </div>
       </div>
+
+      {/* Toast notification */}
+      <Show when={toastMessage()}>
+        <div class={styles.toast}>{toastMessage()}</div>
+      </Show>
     </Show>
   );
 }
@@ -93,6 +68,19 @@ function ResultCard(props: {
     props.onCopy(props.file.text ?? "");
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleDownload = () => {
+    const text = props.file.text ?? "";
+    const blob = new Blob([text], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    // Strip original extension and add .txt
+    const baseName = props.file.name.replace(/\.[^/.]+$/, "");
+    a.download = `${baseName}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -113,16 +101,28 @@ function ResultCard(props: {
           </svg>
           <span>{props.file.name}</span>
         </div>
-        <button
-          class={styles.btnCopy}
-          onClick={(e) => {
-            e.stopPropagation();
-            handleCopy();
-          }}
-          title="Copy to clipboard"
-        >
-          {copied() ? <CheckIcon /> : <CopyIcon />}
-        </button>
+        <div class={styles.resultCardActions}>
+          <button
+            class={styles.btnCopy}
+            onClick={(e) => {
+              e.stopPropagation();
+              handleCopy();
+            }}
+            title="Copy to clipboard"
+          >
+            {copied() ? <CheckIcon /> : <CopyIcon />}
+          </button>
+          <button
+            class={styles.btnCopy}
+            onClick={(e) => {
+              e.stopPropagation();
+              handleDownload();
+            }}
+            title="Download as .txt"
+          >
+            <DownloadIcon />
+          </button>
+        </div>
       </div>
       <Show when={expanded()}>
         <div class={styles.resultCardBody}>
