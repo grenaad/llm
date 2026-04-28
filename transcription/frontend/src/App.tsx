@@ -5,7 +5,6 @@ import { uploadFile, createWebSocket, fetchTranscriptions, deleteTranscription, 
 import Header from "./components/Header";
 import FileUpload from "./components/FileUpload";
 import FileList from "./components/FileList";
-import Transcription from "./components/Transcription";
 import styles from "./App.module.css";
 
 // Store abort functions outside of reactive state
@@ -348,7 +347,6 @@ export default function App() {
           onDeleteAll={handleDeleteAll}
           onRemoveFile={handleRemoveFile}
         />
-        <Transcription files={files()} onDelete={handleRemoveFile} />
       </main>
     </div>
   );

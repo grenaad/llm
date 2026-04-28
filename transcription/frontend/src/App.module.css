@@ -346,41 +346,44 @@
   color: var(--text-primary);
 }
 
-/* ---- Results Section ---- */
-.resultsSection {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+/* ---- Done File Row (expandable) ---- */
+.fileItemDone {
+  background: var(--bg-secondary);
+  transition: background var(--transition);
 }
 
-.resultsSectionHeader {
+.fileItemDone + .fileItemDone,
+.fileItemDone + .fileItem,
+.fileItem + .fileItemDone {
+  border-top: 1px solid var(--border);
+}
+
+.fileItemDoneHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition);
 }
 
-.resultsActions {
-  display: flex;
-  gap: 6px;
-}
-
-.btnSecondary {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 12px;
-  padding: 5px 10px;
-  border-radius: var(--radius);
-  background: var(--bg-tertiary);
-  color: var(--text-secondary);
-  border: 1px solid var(--border);
-  transition: all var(--transition);
-}
-
-.btnSecondary:hover {
+.fileItemDoneHeader:hover {
   background: var(--bg-hover);
-  color: var(--text-primary);
-  border-color: var(--border-light);
+}
+
+.fileItemDoneExpanded {
+  background: var(--bg-secondary);
+}
+
+.chevron {
+  transition: transform var(--transition);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.chevronOpen {
+  transform: rotate(90deg);
 }
 
 .btnCopy {
@@ -400,50 +403,10 @@
   color: var(--text-primary);
 }
 
-/* ---- Result Cards ---- */
-.resultsList {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.resultCard {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-}
-
-.resultCardHeader {
+.resultCardActions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px;
-  cursor: pointer;
-  user-select: none;
-  transition: background var(--transition);
-}
-
-.resultCardHeader:hover {
-  background: var(--bg-hover);
-}
-
-.resultCardTitle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-primary);
-}
-
-.chevron {
-  transition: transform var(--transition);
-  color: var(--text-muted);
-}
-
-.chevronOpen {
-  transform: rotate(90deg);
+  gap: 4px;
 }
 
 .resultCardBody {
@@ -458,12 +421,6 @@
   padding-top: 12px;
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-.resultCardActions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
 }
 
 /* ---- Toast ---- */
