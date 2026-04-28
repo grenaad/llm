@@ -1,8 +1,10 @@
 import asyncio
+import json
 import logging
 import sys
 import time
 import traceback
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -31,7 +33,55 @@ log = logging.getLogger("whisper")
 UPLOAD_DIR = Path("/tmp/whisper_uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+DATA_DIR = Path("/app/data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+TRANSCRIPTIONS_FILE = DATA_DIR / "transcriptions.json"
+
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+# --- JSON Storage Helpers ---
+def load_transcriptions() -> list[dict]:
+    """Load all transcriptions from JSON file."""
+    if not TRANSCRIPTIONS_FILE.exists():
+        return []
+    try:
+        return json.loads(TRANSCRIPTIONS_FILE.read_text())
+    except (json.JSONDecodeError, IOError):
+        return []
+
+
+def save_transcription(id: str, name: str, text: str, size: int) -> dict:
+    """Save a transcription to JSON file."""
+    transcriptions = load_transcriptions()
+    entry = {
+        "id": id,
+        "name": name,
+        "text": text,
+        "size": size,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
+    transcriptions.append(entry)
+    TRANSCRIPTIONS_FILE.write_text(json.dumps(transcriptions, indent=2))
+    return entry
+
+
+def delete_transcription_by_id(id: str) -> bool:
+    """Delete a transcription by ID."""
+    transcriptions = load_transcriptions()
+    filtered = [t for t in transcriptions if t["id"] != id]
+    if len(filtered) == len(transcriptions):
+        return False
+    TRANSCRIPTIONS_FILE.write_text(json.dumps(filtered, indent=2))
+    return True
+
+
+def delete_all_transcriptions() -> int:
+    """Delete all transcriptions. Returns count deleted."""
+    transcriptions = load_transcriptions()
+    count = len(transcriptions)
+    TRANSCRIPTIONS_FILE.write_text("[]")
+    return count
 
 # --- Global transcription queue ---
 # All WebSocket connections share this queue so only one transcription
@@ -75,6 +125,26 @@ async def startup():
 @app.get("/api/status")
 async def status():
     return get_gpu_info()
+
+
+@app.get("/api/transcriptions")
+async def get_transcriptions():
+    """Get all saved transcriptions."""
+    return load_transcriptions()
+
+
+@app.delete("/api/transcriptions/{transcription_id}")
+async def delete_transcription_endpoint(transcription_id: str):
+    """Delete a specific transcription."""
+    deleted = delete_transcription_by_id(transcription_id)
+    return {"deleted": deleted}
+
+
+@app.delete("/api/transcriptions")
+async def delete_all_transcriptions_endpoint():
+    """Delete all transcriptions."""
+    count = delete_all_transcriptions()
+    return {"deleted": count}
 
 
 @app.post("/api/upload/{filename:path}")
@@ -153,6 +223,11 @@ async def websocket_endpoint(ws: WebSocket):
                 if file_id and file_id in cancel_flags:
                     cancel_flags[file_id].set()
                     log.info("Cancel requested: %s", file_id)
+                    # Immediately notify frontend
+                    await ws.send_json({
+                        "type": "cancelled",
+                        "file_id": file_id,
+                    })
 
             elif msg_type == "cancel_all":
                 for flag in cancel_flags.values():
@@ -264,6 +339,20 @@ async def process_file(
                 "name": file_name,
             })
         else:
+            # Get file size before cleanup
+            try:
+                file_size = Path(file_path).stat().st_size
+            except Exception:
+                file_size = 0
+
+            # Save to persistent storage
+            save_transcription(
+                id=file_id,
+                name=file_name,
+                text=text,
+                size=file_size,
+            )
+
             log.info("Result sent: %s (%d chars, %s)",
                      file_name, len(text), _fmt_duration(elapsed))
             await ws.send_json({

@@ -1,9 +1,28 @@
-import type { UploadedFile, GpuInfo } from "./types";
+import type { UploadedFile, GpuInfo, SavedTranscription } from "./types";
 
 const API_BASE = "";
 
 export async function fetchStatus(): Promise<GpuInfo> {
   const res = await fetch(`${API_BASE}/api/status`);
+  return res.json();
+}
+
+export async function fetchTranscriptions(): Promise<SavedTranscription[]> {
+  const res = await fetch(`${API_BASE}/api/transcriptions`);
+  return res.json();
+}
+
+export async function deleteTranscription(id: string): Promise<{ deleted: boolean }> {
+  const res = await fetch(`${API_BASE}/api/transcriptions/${id}`, {
+    method: "DELETE",
+  });
+  return res.json();
+}
+
+export async function deleteAllTranscriptions(): Promise<{ deleted: number }> {
+  const res = await fetch(`${API_BASE}/api/transcriptions`, {
+    method: "DELETE",
+  });
   return res.json();
 }
 

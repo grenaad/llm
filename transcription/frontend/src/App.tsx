@@ -1,7 +1,7 @@
-import { createSignal, onCleanup } from "solid-js";
+import { createSignal, onCleanup, onMount } from "solid-js";
 import { FileStatus, isTerminalStatus } from "./lib/types";
 import type { TranscriptionFile, WsMessage } from "./lib/types";
-import { uploadFile, createWebSocket } from "./lib/api";
+import { uploadFile, createWebSocket, fetchTranscriptions, deleteTranscription, deleteAllTranscriptions } from "./lib/api";
 import Header from "./components/Header";
 import FileUpload from "./components/FileUpload";
 import FileList from "./components/FileList";
@@ -18,6 +18,25 @@ export default function App() {
 
   // Separate signal for upload progress - updates frequently without causing row re-renders
   const [uploadProgress, setUploadProgress] = createSignal<Record<string, number>>({});
+
+  // Load saved transcriptions on mount
+  onMount(async () => {
+    try {
+      const saved = await fetchTranscriptions();
+      // Convert saved transcriptions to TranscriptionFile format
+      const loadedFiles: TranscriptionFile[] = saved.map((t) => ({
+        id: t.id,
+        name: t.name,
+        path: "",
+        size: t.size,
+        status: FileStatus.Done,
+        text: t.text,
+      }));
+      setFiles(loadedFiles);
+    } catch (err) {
+      console.error("Failed to load transcriptions:", err);
+    }
+  });
 
   // Ensure we have a WebSocket connection, creating one if needed
   const ensureWs = (): WebSocket => {
@@ -271,8 +290,15 @@ export default function App() {
     }
   };
 
-  const handleClear = () => {
-    // Remove only finished items (done, cancelled, error)
+  const handleDeleteAll = async () => {
+    // Delete all from server
+    try {
+      await deleteAllTranscriptions();
+    } catch (err) {
+      console.error("Failed to delete transcriptions:", err);
+    }
+
+    // Remove finished items from UI (done, cancelled, error)
     const removedIds = new Set(
       files()
         .filter((f) => isTerminalStatus(f.status))
@@ -289,7 +315,14 @@ export default function App() {
     });
   };
 
-  const handleRemoveFile = (fileId: string) => {
+  const handleRemoveFile = async (fileId: string) => {
+    // Delete from server (for completed transcriptions)
+    try {
+      await deleteTranscription(fileId);
+    } catch (err) {
+      console.error("Failed to delete transcription:", err);
+    }
+
     setFiles((prev) => prev.filter((f) => f.id !== fileId));
     setUploadProgress((prev) => {
       const updated = { ...prev };
@@ -312,10 +345,10 @@ export default function App() {
           uploadProgress={uploadProgress()}
           onCancel={handleCancel}
           onCancelAll={handleCancelAll}
-          onClear={handleClear}
+          onDeleteAll={handleDeleteAll}
           onRemoveFile={handleRemoveFile}
         />
-        <Transcription files={files()} />
+        <Transcription files={files()} onDelete={handleRemoveFile} />
       </main>
     </div>
   );

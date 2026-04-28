@@ -55,3 +55,11 @@ export interface GpuInfo {
   gpu_name?: string;
   gpu_memory_total?: string;
 }
+
+export interface SavedTranscription {
+  id: string;
+  name: string;
+  text: string;
+  size: number;
+  created_at: string;
+}

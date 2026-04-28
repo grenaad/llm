@@ -22,6 +22,7 @@ run: build
 		--name $(CONTAINER_NAME) \
 		-v ~/.cache/huggingface:/root/.cache/huggingface \
 		-v ~/.cache/whisper:/root/.cache/whisper \
+		-v ~/.local/share/whisper-transcriptions:/app/data \
 		$(IMAGE_NAME)
 	@echo "Container started. Model loading (~2 min)..."
 	@echo "Access UI at: http://localhost:$(PORT)"

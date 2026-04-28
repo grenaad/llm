@@ -9,7 +9,7 @@ interface FileListProps {
   uploadProgress: Record<string, number>;
   onCancel: (fileId: string) => void;
   onCancelAll: () => void;
-  onClear: () => void;
+  onDeleteAll: () => void;
   onRemoveFile: (fileId: string) => void;
 }
 
@@ -84,8 +84,8 @@ export default function FileList(props: FileListProps) {
                 Cancel All
               </button>
             </Show>
-            <button class={styles.btnClear} onClick={props.onClear}>
-              Clear
+            <button class={styles.btnClear} onClick={props.onDeleteAll}>
+              Delete all
             </button>
           </div>
         </div>

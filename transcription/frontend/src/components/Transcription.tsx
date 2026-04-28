@@ -5,6 +5,7 @@ import styles from "../App.module.css";
 
 interface TranscriptionProps {
   files: TranscriptionFile[];
+  onDelete: (fileId: string) => void;
 }
 
 // Toast state - shared across all ResultCards
@@ -44,7 +45,7 @@ export default function Transcription(props: TranscriptionProps) {
 
         <div class={styles.resultsList}>
           <For each={completedFiles()}>
-            {(file) => <ResultCard file={file} onCopy={copyToClipboard} />}
+            {(file) => <ResultCard file={file} onCopy={copyToClipboard} onDelete={props.onDelete} />}
           </For>
         </div>
       </div>
@@ -60,6 +61,7 @@ export default function Transcription(props: TranscriptionProps) {
 function ResultCard(props: {
   file: TranscriptionFile;
   onCopy: (text: string) => void;
+  onDelete: (fileId: string) => void;
 }) {
   const [expanded, setExpanded] = createSignal(true);
   const [copied, setCopied] = createSignal(false);
@@ -122,6 +124,16 @@ function ResultCard(props: {
           >
             <DownloadIcon />
           </button>
+          <button
+            class={styles.btnCopy}
+            onClick={(e) => {
+              e.stopPropagation();
+              props.onDelete(props.file.id);
+            }}
+            title="Delete"
+          >
+            <TrashIcon />
+          </button>
         </div>
       </div>
       <Show when={expanded()}>
@@ -156,6 +168,16 @@ function DownloadIcon() {
       <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
       <polyline points="7 10 12 15 17 10" />
       <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 6h18" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
     </svg>
   );
 }
