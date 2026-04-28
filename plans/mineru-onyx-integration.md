@@ -11,24 +11,37 @@ the parsed output automatically pushed to Onyx for search and RAG chat.
 ```
 [Browser]
     |
-    |--- http://localhost:7002  --> [Onyx UI]       (search + chat)
-    |--- http://localhost:7860  --> [MinerU Gradio]  (document upload + OCR)
-    
+    |--- http://localhost:7002  --> [Onyx UI]        (search + chat)
+    |--- http://localhost:7860  --> [MinerU Gradio]   (document upload + OCR)
+
+[MCP Clients: Claude Code, Cursor, Windsurf, etc.]
+    |
+    |--- http://localhost:8090  --> [Onyx MCP Server] (search_indexed_documents)
+
                      Inside Docker network "onyx"
-    ┌─────────────────────────────────────────────────────────────┐
-    │                                                             │
-    │  [MinerU Gradio + API]  ──parse──>  [Markdown/JSON output]  │
-    │       (GPU: 1080 Ti)                       │                │
-    │                                            │                │
-    │                               [push_to_onyx.py hook]        │
-    │                                            │                │
-    │                                   POST /onyx-api/ingestion  │
-    │                                            │                │
-    │                                    [Onyx api_server]        │
-    │                                            │                │
-    │                                 [Vespa index + embeddings]  │
-    │                                    (GPU: 1060)              │
-    └─────────────────────────────────────────────────────────────┘
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                                                                 │
+    │  [MinerU Gradio + API]  ──parse──>  [Markdown/JSON output]      │
+    │       (GPU: 1080 Ti)                       │                    │
+    │                                            │                    │
+    │                      [push_to_onyx.py]                          │
+    │                        │              │                         │
+    │          (first run)   │              │  (every document)       │
+    │     Create File        │              │  POST /onyx-api/        │
+    │     Connector via API  │              │       ingestion         │
+    │                        ▼              ▼                         │
+    │                                                                 │
+    │                        [Onyx api_server :8080]                  │
+    │                                │                                │
+    │                        [Vespa index + embeddings]               │
+    │                           (GPU: 1060)                           │
+    │                                │                                │
+    │                        [Onyx MCP Server :8090]                  │
+    │                                │                                │
+    │                   search_indexed_documents                      │
+    │                   search_web                                    │
+    │                   open_urls                                     │
+    └─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Key Constraints
@@ -54,6 +67,8 @@ the parsed output automatically pushed to Onyx for search and RAG chat.
 | UI approach | Extend MinerU's built-in Gradio | Minimal custom code; already supports all target file types |
 | Onyx integration | Ingestion API (`POST /onyx-api/ingestion`) | Lightweight, documented, supports sections + metadata |
 | Deployment | Sidecar in Onyx compose (overlay file) | Shares Docker network for internal API calls; modular via compose overlay |
+| File Connector | Auto-create via API on first run | No manual Admin Panel steps; `cc_pair_id` needed for docs to appear in Connectors page and filter as `"file"` source in MCP |
+| MCP access | Enabled (`MCP_SERVER_ENABLED=true`, port 8090) | Documents ingested via MinerU are automatically searchable by Claude Code, Cursor, etc. |
 | OpenSearch | Disable before first Onyx run | Saves ~2 GB RAM; not needed for small/personal project |
 
 ---
@@ -86,23 +101,28 @@ make run-gpu
 
 Wait for all services to be healthy. Access Onyx at `http://localhost:7002`.
 
-#### 1.3 Configure Onyx for ingestion
+#### 1.3 Create an Onyx API Key
 
-1. **Create a File Connector** in Onyx Admin Panel:
-   - Navigate to Admin > Connectors > File
-   - Upload a dummy `.txt` file to create the connector
-   - Note the `cc_pair_id` from the URL (e.g., `http://localhost:7002/admin/connector/1` -> cc_pair_id is `1`)
-
-2. **Create an API Key** in Onyx Admin Panel:
-   - Navigate to Admin > API Keys
-   - Create a new **Admin API Key** (needed for ingestion endpoint)
-   - Copy and save the key securely
-
-3. **Add to `.env`** (we'll create these env vars for MinerU to use):
+1. Open Onyx at `http://localhost:7002`
+2. Navigate to **Admin > API Keys**
+3. Create a new **Admin API Key**
+4. Copy the key and add it to `.env`:
    ```
    ONYX_API_KEY=<your_api_key_here>
-   ONYX_CC_PAIR_ID=<your_cc_pair_id_here>
    ```
+
+This is the only manual step. The File Connector and `cc_pair_id` are created
+automatically by `push_to_onyx.py` on its first run (see Phase 2.3).
+
+#### 1.4 Verify MCP server is running
+
+The MCP server is already enabled in `.env` (`MCP_SERVER_ENABLED=true`).
+Verify it's healthy:
+
+```bash
+curl http://localhost:8090/health
+# Expected: {"status": "healthy", "service": "mcp_server"}
+```
 
 ---
 
@@ -168,7 +188,7 @@ WORKDIR /app
 ENV MINERU_MODEL_SOURCE=local
 ENV ONYX_API_URL=http://api_server:8080/api
 ENV ONYX_API_KEY=""
-ENV ONYX_CC_PAIR_ID=""
+# ONYX_CC_PAIR_ID is auto-managed by push_to_onyx.py (cached in output volume)
 
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
@@ -191,22 +211,32 @@ CMD ["--server-name", "0.0.0.0", "--server-port", "7860"]
 
 **File**: `onyx_data/deployment/mineru/push_to_onyx.py`
 
-This module provides a function to push MinerU's parsed output to Onyx's
-Ingestion API.
+This module:
+1. **Auto-creates a File Connector** on first run via Onyx's Admin API
+   (no manual Admin Panel steps needed)
+2. Caches the `cc_pair_id` to a local file so it persists across restarts
+3. Pushes parsed Markdown content to Onyx's Ingestion API
 
 ```python
 """
 push_to_onyx.py - Push MinerU parsed documents to Onyx Ingestion API
 
-Converts MinerU's Markdown/JSON output into Onyx's IngestionDocument format
-and POSTs it to the Onyx API.
+On first run, automatically creates a File Connector in Onyx via the Admin API.
+Subsequent runs reuse the cached cc_pair_id.
 
-Onyx Ingestion API: POST /onyx-api/ingestion
+Onyx APIs used:
+  - POST /manage/admin/connector          (create connector)
+  - PUT  /manage/admin/connector/{id}/credential/0  (associate empty credential)
+  - GET  /manage/admin/connector/indexing-status     (find existing connector)
+  - POST /onyx-api/ingestion              (push documents)
+
 Docs: https://docs.onyx.app/developers/guides/index_files_ingestion_api
+      https://docs.onyx.app/developers/guides/create_connector
 """
 
 import os
 import re
+import json
 import logging
 import httpx
 from pathlib import Path
@@ -216,7 +246,136 @@ logger = logging.getLogger(__name__)
 
 ONYX_API_URL = os.environ.get("ONYX_API_URL", "http://api_server:8080/api")
 ONYX_API_KEY = os.environ.get("ONYX_API_KEY", "")
-ONYX_CC_PAIR_ID = os.environ.get("ONYX_CC_PAIR_ID", "")
+CC_PAIR_CACHE_FILE = Path("/app/output/.onyx_cc_pair_id")
+
+CONNECTOR_NAME = "mineru-ocr-documents"
+
+# Module-level cache
+_cc_pair_id: int | None = None
+
+
+def _headers() -> dict:
+    return {
+        "Authorization": f"Bearer {ONYX_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def _ensure_file_connector() -> int | None:
+    """
+    Ensure a File Connector named 'mineru-ocr-documents' exists in Onyx.
+    Creates one via API if it doesn't exist. Returns the cc_pair_id.
+
+    Uses a 3-step process:
+      1. Check if connector already exists (GET indexing-status)
+      2. If not, create connector (POST /manage/admin/connector)
+      3. Associate with empty credential (PUT connector/{id}/credential/0)
+
+    The cc_pair_id is cached to /app/output/.onyx_cc_pair_id for persistence
+    across container restarts.
+    """
+    global _cc_pair_id
+
+    # Return cached value if available
+    if _cc_pair_id is not None:
+        return _cc_pair_id
+
+    # Try reading from cache file
+    if CC_PAIR_CACHE_FILE.exists():
+        try:
+            _cc_pair_id = int(CC_PAIR_CACHE_FILE.read_text().strip())
+            logger.info(f"Loaded cached cc_pair_id: {_cc_pair_id}")
+            return _cc_pair_id
+        except (ValueError, OSError):
+            pass
+
+    if not ONYX_API_KEY:
+        logger.warning("ONYX_API_KEY not set, skipping connector creation")
+        return None
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            # Step 1: Check if our connector already exists
+            resp = client.get(
+                f"{ONYX_API_URL}/manage/admin/connector/indexing-status",
+                headers=_headers(),
+            )
+            resp.raise_for_status()
+            for item in resp.json():
+                connector = item.get("connector", {})
+                if connector.get("name") == CONNECTOR_NAME:
+                    _cc_pair_id = item.get("cc_pair_id")
+                    if _cc_pair_id:
+                        logger.info(
+                            f"Found existing connector "
+                            f"'{CONNECTOR_NAME}': cc_pair_id={_cc_pair_id}"
+                        )
+                        CC_PAIR_CACHE_FILE.parent.mkdir(
+                            parents=True, exist_ok=True
+                        )
+                        CC_PAIR_CACHE_FILE.write_text(str(_cc_pair_id))
+                        return _cc_pair_id
+
+            # Step 2: Create the connector
+            logger.info(f"Creating File Connector '{CONNECTOR_NAME}'...")
+            resp = client.post(
+                f"{ONYX_API_URL}/manage/admin/connector",
+                headers=_headers(),
+                json={
+                    "name": CONNECTOR_NAME,
+                    "source": "file",
+                    "input_type": "poll",
+                    "access_type": "PUBLIC",
+                    "connector_specific_config": {},
+                    "refresh_freq": None,
+                    "prune_freq": None,
+                },
+            )
+            resp.raise_for_status()
+            connector_id = resp.json()["id"]
+            logger.info(f"Created connector id={connector_id}")
+
+            # Step 3: Associate with empty credential (id=0)
+            # File connectors don't need real credentials
+            resp = client.put(
+                f"{ONYX_API_URL}/manage/admin/connector/"
+                f"{connector_id}/credential/0",
+                headers=_headers(),
+            )
+            resp.raise_for_status()
+            result = resp.json()
+
+            # The response contains the cc_pair_id
+            _cc_pair_id = result.get("data", {}).get("cc_pair_id")
+            if not _cc_pair_id:
+                # Fallback: re-query indexing status to find it
+                resp = client.get(
+                    f"{ONYX_API_URL}/manage/admin/connector/indexing-status",
+                    headers=_headers(),
+                )
+                resp.raise_for_status()
+                for item in resp.json():
+                    connector = item.get("connector", {})
+                    if connector.get("name") == CONNECTOR_NAME:
+                        _cc_pair_id = item.get("cc_pair_id")
+                        break
+
+            if _cc_pair_id:
+                CC_PAIR_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                CC_PAIR_CACHE_FILE.write_text(str(_cc_pair_id))
+                logger.info(
+                    f"File Connector ready: cc_pair_id={_cc_pair_id}"
+                )
+            else:
+                logger.warning(
+                    "Connector created but could not determine cc_pair_id"
+                )
+
+            return _cc_pair_id
+
+    except Exception as e:
+        logger.error(f"Failed to create File Connector: {e}")
+        return None
 
 
 def push_to_onyx(
@@ -227,13 +386,17 @@ def push_to_onyx(
     """
     Push parsed document content to Onyx's Ingestion API.
 
+    On first call, ensures a File Connector exists (auto-created via API).
+    Documents are associated with the connector so they appear in the
+    Admin > Connectors page and are filterable as source "file" in MCP.
+
     Args:
         filename: Original document filename (used as semantic_identifier)
         markdown_content: The parsed Markdown text from MinerU
         metadata: Optional metadata dict (file_type, page_count, etc.)
 
     Returns:
-        dict with keys: success (bool), document_id (str), error (str|None)
+        dict with keys: success, document_id, already_existed, error
     """
     if not ONYX_API_KEY:
         return {
@@ -242,6 +405,9 @@ def push_to_onyx(
             "error": "ONYX_API_KEY not configured",
         }
 
+    # Ensure File Connector exists (auto-creates on first call)
+    cc_pair_id = _ensure_file_connector()
+
     # Build the ingestion payload
     sections = _split_into_sections(markdown_content)
 
@@ -249,7 +415,7 @@ def push_to_onyx(
         "document": {
             "semantic_identifier": filename,
             "sections": sections,
-            "source": "ingestion_api",
+            "source": "file",
             "metadata": {
                 "parsed_by": "mineru",
                 "file_type": Path(filename).suffix.lower(),
@@ -259,25 +425,15 @@ def push_to_onyx(
         },
     }
 
-    # Add cc_pair_id if configured
-    if ONYX_CC_PAIR_ID:
-        try:
-            payload["cc_pair_id"] = int(ONYX_CC_PAIR_ID)
-        except ValueError:
-            logger.warning(f"Invalid ONYX_CC_PAIR_ID: {ONYX_CC_PAIR_ID}")
-
-    # POST to Onyx
-    headers = {
-        "Authorization": f"Bearer {ONYX_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    if cc_pair_id:
+        payload["cc_pair_id"] = cc_pair_id
 
     try:
         with httpx.Client(timeout=60.0) as client:
             response = client.post(
                 f"{ONYX_API_URL}/onyx-api/ingestion",
                 json=payload,
-                headers=headers,
+                headers=_headers(),
             )
             response.raise_for_status()
             result = response.json()
@@ -326,6 +482,15 @@ def _split_into_sections(markdown: str) -> list[dict]:
 
     return [{"text": page.strip()} for page in pages if page.strip()]
 ```
+
+**Key design points:**
+- Connector is auto-created on first `push_to_onyx()` call — no manual setup
+- `cc_pair_id` is cached to `/app/output/.onyx_cc_pair_id` (inside the
+  `mineru_output` Docker volume) so it persists across container restarts
+- `credential_id: 0` is Onyx's built-in empty credential for File/Web
+  connectors that don't need auth
+- Documents use `source: "file"` so they appear as `"file"` type in MCP's
+  `source_types` filter, not `"ingestion_api"`
 
 #### 2.4 Write the custom Gradio wrapper
 
@@ -386,7 +551,7 @@ services:
       MINERU_MODEL_SOURCE: local
       ONYX_API_URL: http://api_server:8080/api
       ONYX_API_KEY: ${ONYX_API_KEY:-}
-      ONYX_CC_PAIR_ID: ${ONYX_CC_PAIR_ID:-}
+      # cc_pair_id is auto-created and cached by push_to_onyx.py
     volumes:
       - mineru_output:/app/output
       - mineru_model_cache:/root/.cache/huggingface
@@ -463,10 +628,13 @@ Add at the bottom:
 ## MINERU OCR CONFIGURATION
 ################################################################################
 ## API key for pushing parsed docs to Onyx (created in Admin > API Keys)
+## Must be an Admin key (needed to auto-create the File Connector on first run)
 ONYX_API_KEY=
-## Connector-Credential pair ID (from Admin > Connectors > File URL)
-ONYX_CC_PAIR_ID=
 ```
+
+Note: `ONYX_CC_PAIR_ID` is **not needed** in `.env`. The `push_to_onyx.py`
+script auto-creates a File Connector named `mineru-ocr-documents` on its first
+run and caches the `cc_pair_id` in the `mineru_output` Docker volume.
 
 ---
 
@@ -509,6 +677,85 @@ make run-full
 2. Simultaneously upload a document to MinerU
 3. Both should complete (may be slower due to VRAM sharing)
 4. Check `nvidia-smi` to verify VRAM stays within 11 GB total
+
+---
+
+### Phase 5: Connect MCP Clients
+
+Documents pushed to Onyx via MinerU are automatically indexed and available
+through Onyx's MCP server. The MCP server is already enabled in `.env`
+(`MCP_SERVER_ENABLED=true`) and listens on port **8090**.
+
+#### 5.1 Available MCP tools
+
+| Tool | Description |
+|---|---|
+| `search_indexed_documents` | Search all indexed docs (including MinerU-ingested). Supports `source_types`, `time_cutoff`, `limit` filters. |
+| `search_web` | Search the public internet |
+| `open_urls` | Fetch full text content from URLs |
+
+MinerU documents will appear with `source_type: "file"` (because we associate
+them with a File Connector). You can filter for them in MCP queries:
+
+```json
+{
+  "query": "quarterly revenue figures",
+  "source_types": ["file"],
+  "limit": 10
+}
+```
+
+#### 5.2 Connect Claude Code
+
+```bash
+claude mcp add --transport http onyx http://localhost:8090/ \
+  --header "Authorization: Bearer <ONYX_API_KEY>"
+```
+
+Or add to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "onyx": {
+      "type": "http",
+      "url": "http://localhost:8090/",
+      "headers": {
+        "Authorization": "Bearer <ONYX_API_KEY>"
+      }
+    }
+  }
+}
+```
+
+#### 5.3 Connect Cursor / Windsurf / other MCP clients
+
+| Setting | Value |
+|---|---|
+| URL | `http://localhost:8090/` |
+| Transport | HTTP (Streamable HTTP) |
+| Auth Header | `Authorization: Bearer <ONYX_API_KEY>` |
+
+Refer to each client's MCP configuration docs for exact setup steps.
+
+#### 5.4 Verify MCP can find MinerU documents
+
+After uploading a document through MinerU Gradio:
+
+1. In Claude Code, ask: "Search onyx for [content from your document]"
+2. Claude should invoke `search_indexed_documents` and return matching chunks
+3. Verify the `source_type` is `"file"` in the results
+
+#### 5.5 Debugging MCP
+
+```bash
+# Check MCP server health
+curl http://localhost:8090/health
+
+# Use the MCP Inspector for interactive debugging
+npx @modelcontextprotocol/inspector
+# -> Select Bearer Token auth, paste your API key, connect to http://localhost:8090/
+```
 
 ---
 
@@ -564,7 +811,7 @@ Concurrent use is possible but not recommended for peak performance.
 
 | File | Change |
 |---|---|
-| `onyx_data/deployment/.env` | Add `ONYX_API_KEY`, `ONYX_CC_PAIR_ID`, set `OPENSEARCH_FOR_ONYX_ENABLED=false` |
+| `onyx_data/deployment/.env` | Add `ONYX_API_KEY`, set `OPENSEARCH_FOR_ONYX_ENABLED=false` |
 | `onyx_data/deployment/Makefile` | Add `build-mineru`, `run-full`, `start-full`, `logs-mineru` targets |
 
 ### No changes needed
@@ -597,14 +844,39 @@ Content-Type: application/json
       { "text": "Parsed content from page 1..." },
       { "text": "Parsed content from page 2..." }
     ],
-    "source": "ingestion_api",
+    "source": "file",
     "metadata": {
       "parsed_by": "mineru",
       "file_type": ".pdf"
-    }
+    },
+    "from_ingestion_api": true
   },
   "cc_pair_id": 1
 }
+```
+
+Note: `cc_pair_id` is auto-determined by `push_to_onyx.py`. Using
+`"source": "file"` (instead of `"ingestion_api"`) ensures documents appear as
+`"file"` type in MCP's `source_types` filter and in the Onyx Admin > Connectors
+page.
+
+### File Connector auto-creation APIs
+
+```bash
+# Step 1: Create connector (one-time, done automatically by push_to_onyx.py)
+POST /manage/admin/connector
+{
+  "name": "mineru-ocr-documents",
+  "source": "file",
+  "input_type": "poll",
+  "access_type": "PUBLIC",
+  "connector_specific_config": {}
+}
+# Returns: {"id": <connector_id>, ...}
+
+# Step 2: Associate with empty credential (File connectors don't need auth)
+PUT /manage/admin/connector/<connector_id>/credential/0
+# Returns cc_pair_id in response
 ```
 
 ### Response
@@ -664,6 +936,7 @@ Content-Type: application/json
 |---|---|
 | Onyx UI | http://localhost:7002 |
 | Onyx API docs | http://localhost:7002/api/docs |
+| Onyx MCP server | http://localhost:8090/ |
 | MinerU Gradio UI | http://localhost:7860 |
 
 ### Key commands
