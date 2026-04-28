@@ -63,3 +63,13 @@ export interface SavedTranscription {
   size: number;
   created_at: string;
 }
+
+export interface ActiveJob {
+  id: string;
+  name: string;
+  path: string;
+  size: number;
+  status: string;
+  progress_seconds?: number;
+  total_seconds?: number;
+}

@@ -83,26 +83,48 @@ def delete_all_transcriptions() -> int:
     TRANSCRIPTIONS_FILE.write_text("[]")
     return count
 
-# --- Global transcription queue ---
-# All WebSocket connections share this queue so only one transcription
-# runs at a time on the GPU, regardless of how many browsers are connected.
+# --- Global state ---
+# Job registry: tracks all queued/in-progress transcription jobs.
+# Jobs survive WebSocket disconnects (page refresh) and continue processing.
+active_jobs: dict[str, dict] = {}
+
+# Connected WebSocket clients. Progress/status is broadcast to ALL clients.
+connected_clients: set[WebSocket] = set()
+
+# Transcription queue: only one job runs at a time on the GPU.
 transcription_queue: asyncio.Queue = asyncio.Queue()
+
+
+async def broadcast(message: dict):
+    """Send a message to all connected WebSocket clients."""
+    disconnected = set()
+    for client in connected_clients:
+        try:
+            await client.send_json(message)
+        except Exception:
+            disconnected.add(client)
+    connected_clients.difference_update(disconnected)
 
 
 async def global_transcription_worker():
     """Process transcription jobs one at a time, globally.
 
-    Each job is a tuple of (ws, file_info, cancel_flag).
+    Each job is a (file_id,) tuple. Job details are in active_jobs.
     This ensures only one file is being transcribed on the GPU at any time,
     even if multiple browsers are submitting files simultaneously.
     """
     while True:
-        ws, file_info, cancel_flag = await transcription_queue.get()
+        file_id = await transcription_queue.get()
+        job = active_jobs.get(file_id)
+        if not job:
+            transcription_queue.task_done()
+            continue
+
         remaining = transcription_queue.qsize()
         log.info("Transcription starting: %s (%d more in queue)",
-                 file_info["name"], remaining)
+                 job["name"], remaining)
         try:
-            await process_file(ws, file_info, cancel_flag)
+            await process_file(file_id)
         except Exception:
             pass  # process_file already handles errors internally
         finally:
@@ -131,6 +153,23 @@ async def status():
 async def get_transcriptions():
     """Get all saved transcriptions."""
     return load_transcriptions()
+
+
+@app.get("/api/jobs")
+async def get_jobs():
+    """Get all active (queued/in-progress) jobs."""
+    return [
+        {
+            "id": job["id"],
+            "name": job["name"],
+            "path": job["path"],
+            "size": job["size"],
+            "status": job["status"],
+            "progress_seconds": job.get("progress_seconds"),
+            "total_seconds": job.get("total_seconds"),
+        }
+        for job in active_jobs.values()
+    ]
 
 
 @app.delete("/api/transcriptions/{transcription_id}")
@@ -182,6 +221,44 @@ async def upload_file(filename: str, request: Request):
     }
 
 
+@app.post("/api/transcribe")
+async def submit_transcription(request: Request):
+    """Submit a file for transcription. Registers the job and queues it.
+
+    Expects JSON body: { "file_id": "...", "file_name": "...", "file_path": "...", "file_size": 0 }
+    """
+    data = await request.json()
+    file_id = data["file_id"]
+    file_name = data["file_name"]
+    file_path = data["file_path"]
+    file_size = data.get("file_size", 0)
+
+    # Create job in global registry
+    cancel_flag = asyncio.Event()
+    active_jobs[file_id] = {
+        "id": file_id,
+        "name": file_name,
+        "path": file_path,
+        "size": file_size,
+        "status": "waiting",
+        "cancel_flag": cancel_flag,
+    }
+
+    # Add to global queue
+    await transcription_queue.put(file_id)
+    log.info("Queued: %s (global queue depth: %d)", file_name, transcription_queue.qsize())
+
+    # Broadcast status to all connected clients
+    await broadcast({
+        "type": "file_status",
+        "file_id": file_id,
+        "name": file_name,
+        "status": "waiting",
+    })
+
+    return {"queued": True, "file_id": file_id}
+
+
 @app.delete("/api/files/{file_id}")
 async def delete_file(file_id: str):
     """Delete an uploaded file."""
@@ -194,85 +271,89 @@ async def delete_file(file_id: str):
 @app.websocket("/api/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
-    log.info("WebSocket connected")
+    connected_clients.add(ws)
+    log.info("WebSocket connected (%d clients)", len(connected_clients))
 
-    # Track cancel flags for this connection's files
-    cancel_flags: dict[str, asyncio.Event] = {}
+    # Send current state of all active jobs to the newly connected client
+    for job in active_jobs.values():
+        msg: dict = {
+            "type": "file_status",
+            "file_id": job["id"],
+            "name": job["name"],
+            "status": job["status"],
+        }
+        if job.get("progress_seconds") is not None:
+            msg["type"] = "file_progress"
+            msg["progress_seconds"] = job["progress_seconds"]
+            msg["total_seconds"] = job.get("total_seconds")
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            pass
 
     try:
         while True:
             data = await ws.receive_json()
             msg_type = data.get("type")
 
-            if msg_type == "transcribe":
-                file_info = {
-                    "id": data["file_id"],
-                    "name": data["file_name"],
-                    "path": data["file_path"],
-                }
-                cancel_flag = asyncio.Event()
-                cancel_flags[file_info["id"]] = cancel_flag
-
-                # Add to global queue -- the single worker processes sequentially
-                await transcription_queue.put((ws, file_info, cancel_flag))
-                log.info("Queued: %s (global queue depth: %d)",
-                         file_info["name"], transcription_queue.qsize())
-
-            elif msg_type == "cancel":
+            if msg_type == "cancel":
                 file_id = data.get("file_id")
-                if file_id and file_id in cancel_flags:
-                    cancel_flags[file_id].set()
+                job = active_jobs.get(file_id)
+                if job:
+                    job["cancel_flag"].set()
                     log.info("Cancel requested: %s", file_id)
-                    # Immediately notify frontend
-                    await ws.send_json({
+                    # Immediately notify all clients
+                    await broadcast({
                         "type": "cancelled",
                         "file_id": file_id,
                     })
 
             elif msg_type == "cancel_all":
-                for flag in cancel_flags.values():
-                    flag.set()
-                log.info("Cancel all requested (%d files)", len(cancel_flags))
+                for job in active_jobs.values():
+                    job["cancel_flag"].set()
+                log.info("Cancel all requested (%d jobs)", len(active_jobs))
 
     except WebSocketDisconnect:
-        log.info("WebSocket disconnected, cancelling %d pending files",
-                 len(cancel_flags))
-        # Cancel all pending jobs for this connection so the worker skips them
-        for flag in cancel_flags.values():
-            flag.set()
+        connected_clients.discard(ws)
+        log.info("WebSocket disconnected (%d clients remain)",
+                 len(connected_clients))
+        # Do NOT cancel jobs -- they continue running for reconnecting clients
     except Exception as e:
+        connected_clients.discard(ws)
         log.error("WebSocket error: %s", e)
         traceback.print_exc()
 
 
-async def process_file(
-    ws: WebSocket,
-    file_info: dict,
-    cancel_flag: asyncio.Event,
-):
-    """Transcribe a single file with chunk progress reporting."""
-    file_id = file_info["id"]
-    file_name = file_info["name"]
-    file_path = file_info["path"]
+async def process_file(file_id: str):
+    """Transcribe a single file with chunk progress reporting.
+
+    Uses the global active_jobs registry and broadcasts status/progress
+    to all connected WebSocket clients.
+    """
+    job = active_jobs.get(file_id)
+    if not job:
+        return
+
+    cancel_flag: asyncio.Event = job["cancel_flag"]
+    file_name = job["name"]
+    file_path = job["path"]
 
     try:
         # Check cancellation before starting
         if cancel_flag.is_set():
             log.info("Skipped (cancelled): %s", file_name)
-            try:
-                await ws.send_json({
-                    "type": "cancelled",
-                    "file_id": file_id,
-                    "name": file_name,
-                })
-            except Exception:
-                pass
+            await broadcast({
+                "type": "cancelled",
+                "file_id": file_id,
+                "name": file_name,
+            })
             return
 
         # Check if model is still loading
         if not is_model_ready():
             log.info("Waiting for model: %s", file_name)
-            await ws.send_json({
+            job["status"] = "loading_model"
+            await broadcast({
                 "type": "file_status",
                 "file_id": file_id,
                 "name": file_name,
@@ -283,7 +364,7 @@ async def process_file(
             while not is_model_ready():
                 if cancel_flag.is_set():
                     log.info("Cancelled while waiting for model: %s", file_name)
-                    await ws.send_json({
+                    await broadcast({
                         "type": "cancelled",
                         "file_id": file_id,
                         "name": file_name,
@@ -293,23 +374,28 @@ async def process_file(
 
             log.info("Model ready, starting: %s", file_name)
 
-        # Send status: transcribing
-        await ws.send_json({
+        # Update status: transcribing
+        job["status"] = "transcribing"
+        await broadcast({
             "type": "file_status",
             "file_id": file_id,
             "name": file_name,
             "status": "transcribing",
         })
 
-        # Create a progress callback that sends progress updates over WebSocket.
+        # Create a progress callback that broadcasts to all clients.
         # Since transcribe_file runs in a thread pool, we need to use
         # run_coroutine_threadsafe to send messages from the thread.
         loop = asyncio.get_event_loop()
 
         def progress_callback(current_seconds: float, total_seconds: float):
             """Called from the transcription thread as segments complete."""
+            # Update job registry for new clients connecting mid-transcription
+            job["progress_seconds"] = current_seconds
+            job["total_seconds"] = total_seconds
+
             future = asyncio.run_coroutine_threadsafe(
-                ws.send_json({
+                broadcast({
                     "type": "file_progress",
                     "file_id": file_id,
                     "name": file_name,
@@ -321,7 +407,7 @@ async def process_file(
             try:
                 future.result(timeout=5)
             except Exception as e:
-                log.warning("Progress send error: %s", e)
+                log.warning("Progress broadcast error: %s", e)
 
         # Run transcription in a thread pool
         t0 = time.monotonic()
@@ -333,7 +419,7 @@ async def process_file(
         # Check cancellation after transcription
         if cancel_flag.is_set():
             log.info("Cancelled after transcription: %s", file_name)
-            await ws.send_json({
+            await broadcast({
                 "type": "cancelled",
                 "file_id": file_id,
                 "name": file_name,
@@ -343,7 +429,7 @@ async def process_file(
             try:
                 file_size = Path(file_path).stat().st_size
             except Exception:
-                file_size = 0
+                file_size = job.get("size", 0)
 
             # Save to persistent storage
             save_transcription(
@@ -355,7 +441,7 @@ async def process_file(
 
             log.info("Result sent: %s (%d chars, %s)",
                      file_name, len(text), _fmt_duration(elapsed))
-            await ws.send_json({
+            await broadcast({
                 "type": "file_result",
                 "file_id": file_id,
                 "name": file_name,
@@ -365,17 +451,16 @@ async def process_file(
     except Exception as e:
         log.error("Transcription error: %s - %s", file_name, e)
         traceback.print_exc()
-        try:
-            await ws.send_json({
-                "type": "file_error",
-                "file_id": file_id,
-                "name": file_name,
-                "error": str(e),
-            })
-        except Exception:
-            pass  # WebSocket may have closed
+        await broadcast({
+            "type": "file_error",
+            "file_id": file_id,
+            "name": file_name,
+            "error": str(e),
+        })
 
     finally:
+        # Remove from active jobs
+        active_jobs.pop(file_id, None)
         # Clean up uploaded file after processing
         try:
             Path(file_path).unlink(missing_ok=True)

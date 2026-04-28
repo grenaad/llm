@@ -1,4 +1,4 @@
-import type { UploadedFile, GpuInfo, SavedTranscription } from "./types";
+import type { UploadedFile, GpuInfo, SavedTranscription, ActiveJob } from "./types";
 
 const API_BASE = "";
 
@@ -22,6 +22,30 @@ export async function deleteTranscription(id: string): Promise<{ deleted: boolea
 export async function deleteAllTranscriptions(): Promise<{ deleted: number }> {
   const res = await fetch(`${API_BASE}/api/transcriptions`, {
     method: "DELETE",
+  });
+  return res.json();
+}
+
+export async function fetchJobs(): Promise<ActiveJob[]> {
+  const res = await fetch(`${API_BASE}/api/jobs`);
+  return res.json();
+}
+
+export async function submitTranscription(file: {
+  id: string;
+  name: string;
+  path: string;
+  size: number;
+}): Promise<{ queued: boolean; file_id: string }> {
+  const res = await fetch(`${API_BASE}/api/transcribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file_id: file.id,
+      file_name: file.name,
+      file_path: file.path,
+      file_size: file.size,
+    }),
   });
   return res.json();
 }

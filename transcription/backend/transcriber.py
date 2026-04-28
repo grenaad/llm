@@ -18,7 +18,7 @@ VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".flv", ".w
 
 # Model configuration
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3")
-COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "float16")
+COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8_float32")
 BATCH_SIZE = int(os.environ.get("WHISPER_BATCH_SIZE", "8"))
 
 # Singleton model instance
@@ -275,11 +275,15 @@ def get_gpu_info() -> dict:
         "batch_size": BATCH_SIZE,
     }
     try:
-        import torch
-        if torch.cuda.is_available():
-            info["gpu_name"] = torch.cuda.get_device_name(0)
-            mem = torch.cuda.get_device_properties(0).total_memory
-            info["gpu_memory_total"] = f"{mem / 1024**3:.1f} GB"
-    except (ImportError, Exception):
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            parts = result.stdout.strip().split(", ")
+            info["gpu_name"] = parts[0]
+            info["gpu_memory_total"] = f"{int(parts[1]) / 1024:.1f} GB"
+    except Exception:
         pass
     return info

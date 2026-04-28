@@ -1,7 +1,7 @@
 import { createSignal, onCleanup, onMount } from "solid-js";
 import { FileStatus, isTerminalStatus } from "./lib/types";
 import type { TranscriptionFile, WsMessage } from "./lib/types";
-import { uploadFile, createWebSocket, fetchTranscriptions, deleteTranscription, deleteAllTranscriptions } from "./lib/api";
+import { uploadFile, createWebSocket, fetchTranscriptions, fetchJobs, submitTranscription, deleteTranscription, deleteAllTranscriptions } from "./lib/api";
 import Header from "./components/Header";
 import FileUpload from "./components/FileUpload";
 import FileList from "./components/FileList";
@@ -18,12 +18,16 @@ export default function App() {
   // Separate signal for upload progress - updates frequently without causing row re-renders
   const [uploadProgress, setUploadProgress] = createSignal<Record<string, number>>({});
 
-  // Load saved transcriptions on mount
+  // Load saved transcriptions and active jobs on mount
   onMount(async () => {
     try {
-      const saved = await fetchTranscriptions();
+      const [saved, jobs] = await Promise.all([
+        fetchTranscriptions(),
+        fetchJobs(),
+      ]);
+
       // Convert saved transcriptions to TranscriptionFile format
-      const loadedFiles: TranscriptionFile[] = saved.map((t) => ({
+      const completedFiles: TranscriptionFile[] = saved.map((t) => ({
         id: t.id,
         name: t.name,
         path: "",
@@ -31,7 +35,28 @@ export default function App() {
         status: FileStatus.Done,
         text: t.text,
       }));
-      setFiles(loadedFiles);
+
+      // Convert active jobs to TranscriptionFile format
+      const activeFiles: TranscriptionFile[] = jobs.map((j) => ({
+        id: j.id,
+        name: j.name,
+        path: j.path,
+        size: j.size,
+        status: j.status as FileStatus,
+        progressSeconds: j.progress_seconds,
+        totalSeconds: j.total_seconds,
+      }));
+
+      // Deduplicate: active jobs take priority (in case a job just completed)
+      const activeIds = new Set(activeFiles.map((f) => f.id));
+      const deduped = completedFiles.filter((f) => !activeIds.has(f.id));
+
+      setFiles([...deduped, ...activeFiles]);
+
+      // Connect WebSocket to receive live updates for active jobs
+      if (activeFiles.length > 0) {
+        ensureWs();
+      }
     } catch (err) {
       console.error("Failed to load transcriptions:", err);
     }
@@ -122,29 +147,18 @@ export default function App() {
   };
 
   /**
-   * Request transcription for a file over WebSocket.
-   * Waits for the socket to be open if it was just created.
+   * Submit a file for transcription via REST endpoint.
+   * This atomically registers the job on the backend, so it survives page refresh.
    */
-  const requestTranscription = (file: TranscriptionFile) => {
-    const socket = ensureWs();
-
-    const send = () => {
-      socket.send(
-        JSON.stringify({
-          type: "transcribe",
-          file_id: file.id,
-          file_name: file.name,
-          file_path: file.path,
-        })
-      );
-    };
-
-    if (socket.readyState === WebSocket.OPEN) {
-      send();
-    } else {
-      // Socket is still connecting, wait for open
-      socket.addEventListener("open", send, { once: true });
-    }
+  const requestTranscription = async (file: TranscriptionFile) => {
+    await submitTranscription({
+      id: file.id,
+      name: file.name,
+      path: file.path,
+      size: file.size,
+    });
+    // Ensure WebSocket is connected to receive progress updates
+    ensureWs();
   };
 
   /**
