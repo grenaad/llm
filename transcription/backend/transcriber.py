@@ -107,11 +107,20 @@ def get_audio_duration(file_path: str) -> float:
 
 
 @dataclass
+class Word:
+    """A single word with timing from word-level timestamps."""
+    start: float
+    end: float
+    word: str
+
+
+@dataclass
 class Segment:
     """A single transcription segment with timing."""
     start: float
     end: float
     text: str
+    words: list[Word] = field(default_factory=list)
 
 
 @dataclass
@@ -150,10 +159,64 @@ def _format_srt_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
+_SRT_MAX_CHARS = 84  # ~2 lines at typical subtitle width (42 chars/line)
+
+
+def _regroup_words_into_chunks(segments: list[Segment]) -> list[Segment]:
+    """Regroup word-level timestamps into short subtitle chunks.
+
+    Collects all words across segments and groups them into chunks
+    of at most _SRT_MAX_CHARS characters, using precise word-level
+    start/end timing for each chunk.
+    """
+    # Flatten all words from all segments
+    all_words: list[Word] = []
+    for seg in segments:
+        all_words.extend(seg.words)
+
+    if not all_words:
+        # No word-level data available, return segments as-is
+        return segments
+
+    chunks: list[Segment] = []
+    chunk_words: list[Word] = []
+    chunk_len = 0
+
+    for word in all_words:
+        word_len = len(word.word) + (1 if chunk_words else 0)  # +1 for space
+        if chunk_words and chunk_len + word_len > _SRT_MAX_CHARS:
+            # Flush current chunk
+            chunks.append(Segment(
+                start=chunk_words[0].start,
+                end=chunk_words[-1].end,
+                text=" ".join(w.word for w in chunk_words),
+            ))
+            chunk_words = []
+            chunk_len = 0
+
+        chunk_words.append(word)
+        chunk_len += word_len
+
+    # Flush remaining words
+    if chunk_words:
+        chunks.append(Segment(
+            start=chunk_words[0].start,
+            end=chunk_words[-1].end,
+            text=" ".join(w.word for w in chunk_words),
+        ))
+
+    return chunks
+
+
 def generate_srt(segments: list[Segment]) -> str:
-    """Generate SRT subtitle content from transcription segments."""
+    """Generate SRT subtitle content from transcription segments.
+
+    Uses word-level timestamps to create short subtitle chunks (~2 lines max).
+    Falls back to segment-level timing if word data is not available.
+    """
+    chunks = _regroup_words_into_chunks(segments)
     lines: list[str] = []
-    for i, seg in enumerate(segments, start=1):
+    for i, seg in enumerate(chunks, start=1):
         lines.append(str(i))
         lines.append(f"{_format_srt_timestamp(seg.start)} --> {_format_srt_timestamp(seg.end)}")
         lines.append(seg.text)
@@ -253,6 +316,7 @@ def transcribe_file(
             language="en",
             batch_size=BATCH_SIZE,
             beam_size=5,
+            word_timestamps=True,  # Per-word timing for subtitle generation
             vad_filter=True,  # Skip silence for speed
             vad_parameters=dict(min_silence_duration_ms=1000),
         )
@@ -274,10 +338,20 @@ def transcribe_file(
             text = segment.text.strip()
             if text:
                 texts.append(text)
+                # Capture word-level timestamps for subtitle generation
+                seg_words: list[Word] = []
+                if segment.words:
+                    for w in segment.words:
+                        seg_words.append(Word(
+                            start=w.start,
+                            end=w.end,
+                            word=w.word.strip(),
+                        ))
                 timed_segments.append(Segment(
                     start=segment.start,
                     end=segment.end,
                     text=text,
+                    words=seg_words,
                 ))
                 # Print segment for docker logs (same format as before)
                 start_str = _format_timestamp(segment.start)
