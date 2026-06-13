@@ -34,6 +34,7 @@ export default function App() {
         size: t.size,
         status: FileStatus.Done,
         text: t.text,
+        hasVideo: !!t.video_path,
       }));
 
       // Convert active jobs to TranscriptionFile format
@@ -104,6 +105,7 @@ export default function App() {
                       ...f,
                       status: FileStatus.Done,
                       text: msg.text,
+                      hasVideo: msg.has_video ?? false,
                       progressSeconds: undefined,
                       totalSeconds: undefined,
                     }

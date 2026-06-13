@@ -22,6 +22,7 @@ class JobStatus(str, Enum):
     WAITING = "waiting"
     LOADING_MODEL = "loading_model"
     TRANSCRIBING = "transcribing"
+    MUXING = "muxing"
 
 
 class ClientMsgType(str, Enum):
@@ -63,6 +64,8 @@ class SavedTranscription(BaseModel):
     text: str
     size: int
     created_at: str
+    srt_text: str | None = None
+    video_path: str | None = None
 
 
 class ActiveJobInfo(BaseModel):
@@ -169,6 +172,7 @@ class WsFileResult(BaseModel):
     file_id: str
     name: str
     text: str
+    has_video: bool = False
 
 
 class WsFileError(BaseModel):

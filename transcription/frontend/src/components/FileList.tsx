@@ -1,7 +1,7 @@
 import { For, Show, createSignal } from "solid-js";
 import { FileStatus, isTerminalStatus } from "../lib/types";
 import type { TranscriptionFile } from "../lib/types";
-import { formatFileSize } from "../lib/api";
+import { formatFileSize, getVideoDownloadUrl } from "../lib/api";
 import styles from "../App.module.css";
 
 interface FileListProps {
@@ -57,6 +57,8 @@ function statusLabel(file: TranscriptionFile, uploadProgress: Record<string, num
       }
       return "Transcribing...";
     }
+    case FileStatus.Muxing:
+      return "Adding subtitles...";
     case FileStatus.Done:
       return "Done";
     case FileStatus.Error:
@@ -75,6 +77,8 @@ function statusClass(status: FileStatus): string {
     case FileStatus.LoadingModel:
       return styles.statusTranscribing;
     case FileStatus.Transcribing:
+      return styles.statusTranscribing;
+    case FileStatus.Muxing:
       return styles.statusTranscribing;
     case FileStatus.Done:
       return styles.statusDone;
@@ -95,7 +99,8 @@ export default function FileList(props: FileListProps) {
         f.status === FileStatus.Transcribing ||
         f.status === FileStatus.Waiting ||
         f.status === FileStatus.Uploading ||
-        f.status === FileStatus.LoadingModel,
+        f.status === FileStatus.LoadingModel ||
+        f.status === FileStatus.Muxing,
     );
 
   return (
@@ -228,6 +233,12 @@ function DoneRow(props: {
     URL.revokeObjectURL(url);
   };
 
+  const handleVideoDownload = () => {
+    const a = document.createElement("a");
+    a.href = getVideoDownloadUrl(props.file.id);
+    a.click();
+  };
+
   return (
     <div classList={{ [styles.fileItemDone]: true, [styles.fileItemDoneExpanded]: expanded() }}>
       <div class={styles.fileItemDoneHeader} onClick={() => setExpanded(!expanded())}>
@@ -270,6 +281,18 @@ function DoneRow(props: {
           >
             <DownloadIcon />
           </button>
+          <Show when={props.file.hasVideo}>
+            <button
+              class={styles.btnCopy}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleVideoDownload();
+              }}
+              title="Download video with subtitles"
+            >
+              <VideoIcon />
+            </button>
+          </Show>
           <button
             class={styles.btnCopy}
             onClick={(e) => {
@@ -316,6 +339,15 @@ function DownloadIcon() {
       <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
       <polyline points="7 10 12 15 17 10" />
       <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  );
+}
+
+function VideoIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="4" width="15" height="16" rx="2" ry="2" />
+      <polygon points="22 4 17 8.5 17 15.5 22 20" />
     </svg>
   );
 }

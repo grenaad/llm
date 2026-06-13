@@ -37,9 +37,12 @@ from models import (
 from transcriber import (
     _fmt_duration,
     _fmt_size,
+    generate_srt,
     get_gpu_info,
+    has_video_stream,
     is_model_ready,
     load_model,
+    mux_subtitles,
     transcribe_file,
 )
 
@@ -63,6 +66,9 @@ DATA_DIR = Path("/app/data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 TRANSCRIPTIONS_FILE = DATA_DIR / "transcriptions.json"
 
+VIDEOS_DIR = DATA_DIR / "videos"
+VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
+
 STATIC_DIR = Path(__file__).parent / "static"
 
 
@@ -78,7 +84,14 @@ def load_transcriptions() -> list[SavedTranscription]:
         return []
 
 
-def save_transcription(id: str, name: str, text: str, size: int) -> SavedTranscription:
+def save_transcription(
+    id: str,
+    name: str,
+    text: str,
+    size: int,
+    srt_text: str | None = None,
+    video_path: str | None = None,
+) -> SavedTranscription:
     """Save a transcription to JSON file."""
     transcriptions = load_transcriptions()
     entry = SavedTranscription(
@@ -87,6 +100,8 @@ def save_transcription(id: str, name: str, text: str, size: int) -> SavedTranscr
         text=text,
         size=size,
         created_at=datetime.utcnow().isoformat() + "Z",
+        srt_text=srt_text,
+        video_path=video_path,
     )
     transcriptions.append(entry)
     TRANSCRIPTIONS_FILE.write_text(
@@ -96,8 +111,14 @@ def save_transcription(id: str, name: str, text: str, size: int) -> SavedTranscr
 
 
 def delete_transcription_by_id(id: str) -> bool:
-    """Delete a transcription by ID."""
+    """Delete a transcription by ID, including any associated video file."""
     transcriptions = load_transcriptions()
+    # Find and remove the video file if it exists
+    for t in transcriptions:
+        if t.id == id and t.video_path:
+            video_file = VIDEOS_DIR / t.video_path
+            video_file.unlink(missing_ok=True)
+            break
     filtered = [t for t in transcriptions if t.id != id]
     if len(filtered) == len(transcriptions):
         return False
@@ -108,9 +129,14 @@ def delete_transcription_by_id(id: str) -> bool:
 
 
 def delete_all_transcriptions() -> int:
-    """Delete all transcriptions. Returns count deleted."""
+    """Delete all transcriptions and associated video files. Returns count deleted."""
     transcriptions = load_transcriptions()
     count = len(transcriptions)
+    # Clean up all video files
+    for t in transcriptions:
+        if t.video_path:
+            video_file = VIDEOS_DIR / t.video_path
+            video_file.unlink(missing_ok=True)
     TRANSCRIPTIONS_FILE.write_text("[]")
     return count
 
@@ -294,6 +320,26 @@ async def delete_file(file_id: str) -> DeleteResponse:
     return DeleteResponse(deleted=False)
 
 
+@app.get("/api/videos/{transcription_id}")
+async def download_video(transcription_id: str) -> FileResponse:
+    """Download the subtitled MKV video for a transcription."""
+    for t in load_transcriptions():
+        if t.id == transcription_id:
+            if not t.video_path:
+                raise HTTPException(status_code=404, detail="No video available")
+            video_file = VIDEOS_DIR / t.video_path
+            if not video_file.exists():
+                raise HTTPException(status_code=404, detail="Video file not found")
+            # Use original name but with .mkv extension
+            download_name = Path(t.name).stem + ".mkv"
+            return FileResponse(
+                path=str(video_file),
+                filename=download_name,
+                media_type="video/x-matroska",
+            )
+    raise HTTPException(status_code=404, detail="Transcription not found")
+
+
 @app.websocket("/api/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
@@ -431,7 +477,7 @@ async def process_file(file_id: str) -> None:
 
         # Run transcription in a thread pool
         t0 = time.monotonic()
-        text = await loop.run_in_executor(
+        result = await loop.run_in_executor(
             None, transcribe_file, file_path, progress_callback, job.cancel_flag.is_set
         )
         elapsed = time.monotonic() - t0
@@ -447,20 +493,60 @@ async def process_file(file_id: str) -> None:
             except Exception:
                 file_size = job.size
 
+            # Generate SRT and mux subtitles if the source is a video
+            srt_text: str | None = None
+            video_filename: str | None = None
+
+            is_video = await loop.run_in_executor(
+                None, has_video_stream, file_path
+            )
+
+            if is_video and result.segments:
+                srt_text = generate_srt(result.segments)
+
+                # Update status: muxing
+                job.status = JobStatus.MUXING
+                await broadcast(WsFileStatus(
+                    file_id=file_id,
+                    name=file_name,
+                    status=JobStatus.MUXING,
+                ))
+
+                # Write SRT to temp file, mux into MKV
+                base_name = Path(file_name).stem
+                video_filename = f"{file_id}_{base_name}.mkv"
+                srt_tmp = UPLOAD_DIR / f"{file_id}.srt"
+                output_mkv = VIDEOS_DIR / video_filename
+
+                try:
+                    srt_tmp.write_text(srt_text, encoding="utf-8")
+                    await loop.run_in_executor(
+                        None, mux_subtitles,
+                        file_path, str(srt_tmp), str(output_mkv),
+                    )
+                except Exception as mux_err:
+                    log.error("Subtitle muxing failed for %s: %s", file_name, mux_err)
+                    video_filename = None  # Still save transcription without video
+                finally:
+                    srt_tmp.unlink(missing_ok=True)
+
             # Save to persistent storage
             save_transcription(
                 id=file_id,
                 name=file_name,
-                text=text,
+                text=result.text,
                 size=file_size,
+                srt_text=srt_text,
+                video_path=video_filename,
             )
 
             log.info("Result sent: %s (%d chars, %s)",
-                     file_name, len(text), _fmt_duration(elapsed))
+                     file_name, len(result.text), _fmt_duration(elapsed))
             await broadcast(WsFileResult(
                 file_id=file_id,
                 name=file_name,
-                text=text,
+                text=result.text,
+                has_video=video_filename is not None,
             ))
 
     except Exception as e:

@@ -4,6 +4,7 @@ export enum FileStatus {
   Waiting = "waiting",
   LoadingModel = "loading_model",
   Transcribing = "transcribing",
+  Muxing = "muxing",
   Done = "done",
   Error = "error",
   Cancelled = "cancelled",
@@ -29,6 +30,7 @@ export interface TranscriptionFile {
   error?: string;
   progressSeconds?: number;
   totalSeconds?: number;
+  hasVideo?: boolean;
 }
 
 export interface UploadedFile {
@@ -47,6 +49,7 @@ export interface WsMessage {
   error?: string;
   progress_seconds?: number;
   total_seconds?: number;
+  has_video?: boolean;
 }
 
 export interface GpuInfo {
@@ -62,6 +65,8 @@ export interface SavedTranscription {
   text: string;
   size: number;
   created_at: string;
+  srt_text?: string;
+  video_path?: string;
 }
 
 export interface ActiveJob {

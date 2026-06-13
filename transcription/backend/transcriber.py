@@ -6,6 +6,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from faster_whisper import BatchedInferencePipeline, WhisperModel
 
@@ -105,6 +106,86 @@ def get_audio_duration(file_path: str) -> float:
 
 
 
+@dataclass
+class Segment:
+    """A single transcription segment with timing."""
+    start: float
+    end: float
+    text: str
+
+
+@dataclass
+class TranscriptionResult:
+    """Result of a transcription, containing text and timed segments."""
+    text: str
+    segments: list[Segment] = field(default_factory=list)
+
+
+def has_video_stream(file_path: str) -> bool:
+    """Check if a file contains a video stream using ffprobe."""
+    cmd = [
+        "ffprobe", "-v", "quiet",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=codec_type",
+        "-print_format", "json",
+        file_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            info = json.loads(result.stdout)
+            streams = info.get("streams", [])
+            return len(streams) > 0
+    except Exception as e:
+        log.warning("ffprobe video check failed for %s: %s", file_path, e)
+    return False
+
+
+def _format_srt_timestamp(seconds: float) -> str:
+    """Format seconds as HH:MM:SS,mmm for SRT format (comma separator)."""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int((seconds % 1) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def generate_srt(segments: list[Segment]) -> str:
+    """Generate SRT subtitle content from transcription segments."""
+    lines: list[str] = []
+    for i, seg in enumerate(segments, start=1):
+        lines.append(str(i))
+        lines.append(f"{_format_srt_timestamp(seg.start)} --> {_format_srt_timestamp(seg.end)}")
+        lines.append(seg.text)
+        lines.append("")  # blank line between entries
+    return "\n".join(lines)
+
+
+def mux_subtitles(video_path: str, srt_path: str, output_path: str) -> None:
+    """Mux SRT subtitles into a video as a soft subtitle track (MKV output).
+
+    Uses ffmpeg with -c copy (no re-encoding), so this is fast and lossless.
+    """
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-i", srt_path,
+        "-c", "copy",
+        "-c:s", "srt",
+        output_path,
+    ]
+    log.info("Muxing subtitles: %s", os.path.basename(output_path))
+    t0 = time.monotonic()
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    elapsed = time.monotonic() - t0
+
+    if result.returncode != 0:
+        log.error("ffmpeg mux failed: %s", result.stderr[-500:] if result.stderr else "unknown")
+        raise RuntimeError(f"ffmpeg subtitle mux failed (exit {result.returncode})")
+
+    log.info("Muxing complete in %s", _fmt_duration(elapsed))
+
+
 def _log_gpu_mem() -> None:
     """Log current GPU memory usage (one line)."""
     try:
@@ -128,7 +209,7 @@ def transcribe_file(
     file_path: str,
     progress_callback: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
-) -> str:
+) -> TranscriptionResult:
     """Transcribe a single audio/video file using faster-whisper with batched inference.
 
     Args:
@@ -137,6 +218,9 @@ def transcribe_file(
             segments are transcribed. Optional.
         cancel_check: Called between segments; returns True if cancelled.
             Stops processing remaining segments early. Optional.
+
+    Returns:
+        TranscriptionResult with full text and timed segments.
     """
     if not _model_ready.is_set():
         log.info("Model still loading, waiting...")
@@ -177,7 +261,8 @@ def transcribe_file(
                  info.language, info.language_probability)
 
         # Collect segments and report progress
-        texts = []
+        texts: list[str] = []
+        timed_segments: list[Segment] = []
         cancelled = False
         for segment in segments:
             # Check for cancellation between segments
@@ -189,6 +274,11 @@ def transcribe_file(
             text = segment.text.strip()
             if text:
                 texts.append(text)
+                timed_segments.append(Segment(
+                    start=segment.start,
+                    end=segment.end,
+                    text=text,
+                ))
                 # Print segment for docker logs (same format as before)
                 start_str = _format_timestamp(segment.start)
                 end_str = _format_timestamp(segment.end)
@@ -202,7 +292,7 @@ def transcribe_file(
             total_elapsed = time.monotonic() - t_total
             log.info("Cancelled: %s after %s", file_name, _fmt_duration(total_elapsed))
             _log_gpu_mem()
-            return ""
+            return TranscriptionResult(text="", segments=[])
 
         # Report final progress
         if progress_callback and duration > 0:
@@ -221,7 +311,7 @@ def transcribe_file(
                      file_name, _fmt_duration(total_elapsed), len(full_text))
 
         _log_gpu_mem()
-        return full_text
+        return TranscriptionResult(text=full_text, segments=timed_segments)
 
     except Exception:
         total_elapsed = time.monotonic() - t_total
