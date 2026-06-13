@@ -19,6 +19,7 @@ run: build
 	docker run -d --gpus all \
 		-p $(PORT):7860 \
 		--shm-size=8GB \
+		--restart=unless-stopped \
 		--name $(CONTAINER_NAME) \
 		-v ~/.cache/huggingface:/root/.cache/huggingface \
 		-v ~/.cache/whisper:/root/.cache/whisper \

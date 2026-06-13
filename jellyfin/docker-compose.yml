@@ -1,0 +1,20 @@
+services:
+  jellyfin:
+    image: jellyfin/jellyfin
+    container_name: jellyfin
+    ports:
+      - 8096:8096/tcp
+      - 7359:7359/udp
+    volumes:
+      - ~/.local/share/jellyfin/config:/config
+      - ~/.local/share/jellyfin/cache:/cache
+      - ~/.local/share/whisper-transcriptions:/media
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
