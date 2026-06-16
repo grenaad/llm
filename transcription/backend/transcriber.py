@@ -1,12 +1,14 @@
 import json
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from faster_whisper import BatchedInferencePipeline, WhisperModel
 
@@ -24,6 +26,23 @@ _model = None
 _batched_model = None
 _device = None
 _model_ready = threading.Event()
+
+
+def derive_display_title(file_name: str) -> str:
+    """Convert an upload filename into a human-readable display title.
+
+    Strips the file extension, replaces underscores with spaces, collapses
+    whitespace, and strips a trailing YouTube-style `[xxxxxxxxxxx]` ID tag.
+    Used as the value embedded into the MKV container's `title` tag so
+    Jellyfin can display a clean name instead of the uuid-prefixed filename.
+    """
+    stem = Path(file_name).stem
+    # Drop trailing " [youtubeid]" style suffix produced by yt-dlp
+    stem = re.sub(r"\s*\[[A-Za-z0-9_-]{6,}\]\s*$", "", stem)
+    # Underscores -> spaces, collapse runs of whitespace
+    stem = stem.replace("_", " ")
+    stem = re.sub(r"\s+", " ", stem).strip()
+    return stem or Path(file_name).stem
 
 
 def _fmt_size(nbytes: int) -> str:
@@ -224,10 +243,23 @@ def generate_srt(segments: list[Segment]) -> str:
     return "\n".join(lines)
 
 
-def mux_subtitles(video_path: str, srt_path: str, output_path: str) -> None:
+def mux_subtitles(
+    video_path: str,
+    srt_path: str,
+    output_path: str,
+    title: str | None = None,
+) -> None:
     """Mux SRT subtitles into a video as a soft subtitle track (MKV output).
 
     Uses ffmpeg with -c copy (no re-encoding), so this is fast and lossless.
+
+    Args:
+        video_path: Source video file.
+        srt_path: SRT subtitle file to embed.
+        output_path: Output MKV path.
+        title: If provided, written as the MKV container-level title tag.
+            Jellyfin (with "Prefer embedded titles over filenames" enabled
+            on the library) uses this for the displayed item name.
     """
     cmd = [
         "ffmpeg", "-y",
@@ -235,9 +267,18 @@ def mux_subtitles(video_path: str, srt_path: str, output_path: str) -> None:
         "-i", srt_path,
         "-c", "copy",
         "-c:s", "srt",
-        output_path,
+        # Tag the embedded subtitle track for nice player labeling.
+        "-metadata:s:s:0", "language=eng",
+        "-metadata:s:s:0", "title=English (Whisper)",
+        "-disposition:s:0", "default",
     ]
-    log.info("Muxing subtitles: %s", os.path.basename(output_path))
+    if title:
+        # Container-level title -- this is what Jellyfin reads when
+        # "Prefer embedded titles over filenames" is on.
+        cmd += ["-metadata", f"title={title}"]
+    cmd.append(output_path)
+
+    log.info("Muxing subtitles: %s (title=%r)", os.path.basename(output_path), title)
     t0 = time.monotonic()
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     elapsed = time.monotonic() - t0
@@ -247,6 +288,38 @@ def mux_subtitles(video_path: str, srt_path: str, output_path: str) -> None:
         raise RuntimeError(f"ffmpeg subtitle mux failed (exit {result.returncode})")
 
     log.info("Muxing complete in %s", _fmt_duration(elapsed))
+
+
+def retag_title(input_path: str, output_path: str, title: str) -> None:
+    """Rewrite an existing MKV with a new container-level title tag.
+
+    Uses -c copy so it's a fast remux with no quality loss. The output path
+    must differ from the input; the caller is responsible for swapping the
+    file in place if desired.
+    """
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", input_path,
+        "-map", "0",
+        "-c", "copy",
+        "-metadata", f"title={title}",
+        # Force the Matroska muxer because callers commonly hand us a
+        # temp output path (e.g. foo.mkv.retag.tmp) where ffmpeg cannot
+        # infer the container from the extension.
+        "-f", "matroska",
+        output_path,
+    ]
+    t0 = time.monotonic()
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    elapsed = time.monotonic() - t0
+
+    if result.returncode != 0:
+        log.error("ffmpeg retag failed: %s",
+                  result.stderr[-500:] if result.stderr else "unknown")
+        raise RuntimeError(f"ffmpeg retag failed (exit {result.returncode})")
+
+    log.info("Retag complete: %s (title=%r) in %s",
+             os.path.basename(output_path), title, _fmt_duration(elapsed))
 
 
 def _log_gpu_mem() -> None:

@@ -37,12 +37,14 @@ from models import (
 from transcriber import (
     _fmt_duration,
     _fmt_size,
+    derive_display_title,
     generate_srt,
     get_gpu_info,
     has_video_stream,
     is_model_ready,
     load_model,
     mux_subtitles,
+    retag_title,
     transcribe_file,
 )
 
@@ -249,6 +251,49 @@ async def delete_all_transcriptions_endpoint() -> DeleteCountResponse:
     """Delete all transcriptions."""
     count = delete_all_transcriptions()
     return DeleteCountResponse(deleted=count)
+
+
+@app.post("/api/admin/backfill-titles")
+async def backfill_titles() -> DeleteCountResponse:
+    """Rewrite all existing MKV videos to embed a clean container title tag.
+
+    Iterates every saved transcription that has an associated video file and
+    re-muxes it with `-metadata title="<original name without extension>"`.
+    The remux is `-c copy` so it's fast and lossless.
+
+    Returns the count of files successfully retagged (reusing
+    DeleteCountResponse for a simple {deleted: N} shape).
+    """
+    loop = asyncio.get_event_loop()
+    transcriptions = load_transcriptions()
+    retagged = 0
+    failed = 0
+
+    for t in transcriptions:
+        if not t.video_path:
+            continue
+        video_file = VIDEOS_DIR / t.video_path
+        if not video_file.exists():
+            continue
+
+        title = derive_display_title(t.name)
+        tmp_out = video_file.with_suffix(video_file.suffix + ".retag.tmp")
+
+        try:
+            await loop.run_in_executor(
+                None, retag_title, str(video_file), str(tmp_out), title,
+            )
+            # Atomic swap on POSIX
+            tmp_out.replace(video_file)
+            retagged += 1
+            log.info("Backfill retagged: %s -> %r", t.video_path, title)
+        except Exception as e:
+            failed += 1
+            log.error("Backfill failed for %s: %s", t.video_path, e)
+            tmp_out.unlink(missing_ok=True)
+
+    log.info("Backfill complete: %d retagged, %d failed", retagged, failed)
+    return DeleteCountResponse(deleted=retagged)
 
 
 @app.post("/api/upload/{filename:path}")
@@ -520,9 +565,15 @@ async def process_file(file_id: str) -> None:
 
                 try:
                     srt_tmp.write_text(srt_text, encoding="utf-8")
+                    # Clean human-readable title embedded into the MKV
+                    # container so Jellyfin can display it instead of the
+                    # uuid-prefixed filename (requires "Prefer embedded
+                    # titles over filenames" enabled on the library).
+                    display_title = derive_display_title(file_name)
                     await loop.run_in_executor(
                         None, mux_subtitles,
                         file_path, str(srt_tmp), str(output_mkv),
+                        display_title,
                     )
                 except Exception as mux_err:
                     log.error("Subtitle muxing failed for %s: %s", file_name, mux_err)
