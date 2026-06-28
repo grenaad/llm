@@ -1,0 +1,21 @@
+[project]
+name = "mec-pdf"
+version = "0.1.0"
+description = "PDF rasterise + per-page skew detection/correction pipeline for Mistral OCR 4"
+requires-python = ">=3.12"
+dependencies = [
+    # Pinned to numpy < 2 because system-provided python3-opencv (apt) is built
+    # against numpy 1.x ABI. If you switch to `opencv-python` from PyPI, this
+    # pin can be relaxed.
+    "numpy<2",
+    "scipy<1.13",
+    "tifffile<2025",
+    "scikit-image<0.24",
+    "pillow>=10",
+    "deskew>=1.5",
+    "opencv-python-headless>=4.9,<5",
+]
+
+[tool.uv]
+# Quiet the resolver about dev-only extras.
+package = false
